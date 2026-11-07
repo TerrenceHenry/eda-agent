@@ -154,14 +154,16 @@ The polling loop starts and your MCP client can drive Altium.
 
 ### Updating
 
-For as long as it runs, the server looks once an hour, in the background, whether this repository has new commits; the look is a cheap check that the branch has moved, and a full check follows only when it has. When there are new commits, the next tool reply says so and lists them, `app_ping` and `app_context` repeat it, and the assistant asks you before installing anything. A check that fails is reported once too. A copy installed with pip from this repository compares the commit it was installed from with the latest one; any other pip install compares its version with the one here. Either says how to upgrade. If you agree, `server_update(apply=True)` fast-forwards your clone, reinstalls when the dependencies changed, copies the Altium scripts again when they changed and restarts the polling loop. Then reconnect the server (`/mcp` in Claude Code) to run the new Python. From a terminal, the same thing is:
+This fork removes the sponsorship banner and heart from the Altium status window. Background update checks are disabled by default, so starting the MCP server does not start an update-checking thread or contact upstream for version checks. Set `EDA_AGENT_UPDATE_CHECK=0` in the MCP client configuration to keep checks disabled explicitly. An intentional opt-in with `EDA_AGENT_UPDATE_CHECK=1` enables the upstream background checker.
+
+Manual checks remain available:
 
 ```bash
-eda-agent update          # shows what is new, then asks
-eda-agent update --check  # only shows what is new
+eda-agent update --check  # checks only when explicitly invoked
+eda-agent update         # shows what is new, then asks before applying it
 ```
 
-A clone with uncommitted changes, commits of its own or another branch checked out is never touched; the update says why and stops. Set `EDA_AGENT_UPDATE_CHECK=0` to stop the background check from reaching the network.
+The `server_update` tool also checks only when explicitly called. A clone with uncommitted changes, commits of its own or another branch checked out is never overwritten by the updater. Review and merge upstream changes into this fork explicitly to retain its local preferences. After deploying Python changes, reconnect the MCP server so it loads the new code.
 
 ## EDA backends
 

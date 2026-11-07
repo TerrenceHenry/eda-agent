@@ -1,4 +1,10 @@
-# Release verification: 2026.11.06.27
+# Release verification: 2026.11.07.1
+
+Fork build `0.8.1.post1` removes the sponsorship banner and heart from the
+status window. Background update checks are disabled by default; manual
+checks remain available. After deploying, verify the log tab has no
+sponsorship controls and the Python process has no `eda-agent-update-check`
+thread when `EDA_AGENT_UPDATE_CHECK` is unset or `0`.
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -421,8 +427,8 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.11.06.27`, `version_match` =
-`true`, and `mcp_server_version` = `0.8.1`.
+Expect `altium_script_version` = `2026.11.07.1`, `version_match` =
+`true`, and `mcp_server_version` = `0.8.1.post1`.
 
 Those are two different versions and they fail differently.
 `altium_script_version` is the Pascal that Altium compiled;

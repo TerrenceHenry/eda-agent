@@ -6,10 +6,11 @@ eda-agent is installed from a git clone (``pip install -e .``), so an update
 is a fast-forward of that clone plus the steps that make the new code run:
 a reinstall when the dependencies changed, the Altium scripts copied again
 when they changed, and the Altium loop relaunched to compile them. Nothing
-here runs on its own. The server looks every hour, for as long as it runs,
+here applies an update on its own. Background checks are disabled by default
+in this fork. With EDA_AGENT_UPDATE_CHECK=1, the server looks every hour
 whether the branch has moved (one ls-remote; a fetch only when it has, or
-when the last fetch is a day old), and reports new commits on the first tool reply after the
-check and on every app_ping and app_context; the assistant tells the user
+when the last fetch is a day old), and reports new commits on the first tool
+reply after the check and on every app_ping and app_context; the assistant tells the user
 what is new and calls ``server_update(apply=True)`` only after the user says
 yes, and the MCP client's own approval prompt is a second gate. A check
 that fails is reported once too, so a missing notice means nothing new.
@@ -19,8 +20,8 @@ and a copy installed from git the commit pip recorded with the branch's
 head, and says how to upgrade it; it is never upgraded from here.
 
 A clone with local changes, or with commits of its own, is never touched:
-the update is refused and says why. EDA_AGENT_UPDATE_CHECK=0 stops the
-daily check from reaching the network.
+the update is refused and says why. Manual checks remain available when
+background checks are disabled.
 """
 from __future__ import annotations
 
@@ -127,8 +128,8 @@ def _write_cache(info: dict) -> None:
 
 
 def _checks_enabled() -> bool:
-    return os.environ.get("EDA_AGENT_UPDATE_CHECK", "1").strip().lower() \
-        not in ("0", "false", "no", "off")
+    return os.environ.get("EDA_AGENT_UPDATE_CHECK", "0").strip().lower() \
+        in ("1", "true", "yes", "on")
 
 
 def check(force: bool = False, root: Optional[Path] = None) -> dict[str, Any]:

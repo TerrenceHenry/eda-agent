@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""The status window's sponsor note and update icon.
+"""The status window has no sponsorship controls and keeps its update icon.
 
 The update icon is driven by a flag file the server writes after each
 update check; the form only tests that the file exists. These tests pin
@@ -50,23 +50,14 @@ def test_update_icon_hidden_until_the_flag_appears():
     assert "UpdateUpdateBadge(0);" in PAS
 
 
-def test_sponsor_link_matches_funding_file():
-    funding = (ROOT / ".github" / "FUNDING.yml").read_text(encoding="utf-8")
-    assert "github: salitronic" in funding
-    assert "SPONSOR_URL          = 'https://github.com/sponsors/salitronic';" in PAS
-
-
-def test_sponsor_note_closes_for_good_and_only_shows_on_the_log_tab():
-    assert "FileExists(WorkspaceDir + SPONSOR_CLOSED_FILE)" in PAS
-    assert "WriteFileContent(WorkspaceDir + SPONSOR_CLOSED_FILE" in PAS
-    assert "pnl_Sponsor.Visible := mmo_Log.Visible And Not SponsorNoteClosed(0);" in PAS
+def test_sponsorship_controls_and_handlers_are_removed():
+    assert "Sponsor" not in DFM
+    assert "Sponsor" not in PAS
+    assert "sponsors/salitronic" not in PAS
+    assert "sponsor_note_closed" not in PAS
 
 
 def test_every_new_handler_is_defined():
-    for name in ("btn_SponsorClick", "btn_SponsorEnter", "btn_SponsorLeave",
-                 "btn_SponsorCloseClick", "btn_SponsorCloseEnter",
-                 "btn_SponsorCloseLeave", "btn_SponsorHeartEnter",
-                 "btn_SponsorHeartLeave", "btn_UpdateClick",
-                 "btn_UpdateEnter", "btn_UpdateLeave"):
+    for name in ("btn_UpdateClick", "btn_UpdateEnter", "btn_UpdateLeave"):
         assert f"= {name}" in DFM
         assert f"Procedure {name}(Sender : TObject);" in PAS

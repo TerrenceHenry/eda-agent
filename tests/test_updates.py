@@ -75,6 +75,33 @@ def _publish(pub: Path, rel: str, text: str, title: str) -> None:
     _git(pub, "push", "-q", "origin", "main")
 
 
+@pytest.mark.parametrize("value", [None, "0", "false", "no", "off", "", "unexpected"])
+def test_background_checks_do_not_start_without_explicit_opt_in(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("EDA_AGENT_UPDATE_CHECK", raising=False)
+    else:
+        monkeypatch.setenv("EDA_AGENT_UPDATE_CHECK", value)
+
+    def unexpected_thread(*args, **kwargs):
+        pytest.fail("background update checker started without opt-in")
+
+    monkeypatch.setattr(updates.threading, "Thread", unexpected_thread)
+    updates.start_background_check()
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", " TRUE "])
+def test_background_checks_can_be_enabled_explicitly(monkeypatch, value):
+    monkeypatch.setenv("EDA_AGENT_UPDATE_CHECK", value)
+    assert updates._checks_enabled()
+
+
+def test_manual_checks_work_with_background_checks_disabled(clones, monkeypatch):
+    _, user, _ = clones
+    monkeypatch.setenv("EDA_AGENT_UPDATE_CHECK", "0")
+    info = updates.check(force=True)
+    assert info["update_available"] is False and info["behind"] == 0
+
+
 def test_an_up_to_date_clone_reports_nothing(clones):
     _, user, _ = clones
     info = updates.check(force=True)
