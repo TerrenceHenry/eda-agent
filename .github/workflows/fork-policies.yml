@@ -1,0 +1,32 @@
+name: Fork policies
+
+on:
+  push:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-policies-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fork-policies:
+    # Keep this name stable: main requires this GitHub Actions status check.
+    name: Fork policies
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # No pip dependencies, installed package, live EDA or forced updater
+      # environment setting: test the checked-out source and its real default.
+      - name: Enforce fork policies
+        run: python -S -m unittest tests.test_fork_policies -v

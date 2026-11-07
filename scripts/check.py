@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "tests"
 
 GUARDS = (
+    "test_fork_policies.py",
     "test_every_source_file_names_its_copyright.py",
     "test_bridge_handlers_reachable.py",
     "test_imports_are_declared.py",
