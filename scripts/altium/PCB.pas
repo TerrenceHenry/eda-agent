@@ -4728,13 +4728,34 @@ Var
     Iter : IPCB_BoardIterator;
     Comp : IPCB_Component;
     Obj : IPCB_Primitive;
+    Comps : TInterfaceList;
+    I, Failed : Integer;
+    Ok : Boolean;
     DesStr, ComStr, FilterStr : String;
     SetNames, SetComments, NamesOn, CommentsOn : Boolean;
     HasFilter : Boolean;
     Matched, UpdatedNames, UpdatedComments : Integer;
     CompName : String;
     NameMark : String;
+    Version : String;
+    Major, Dot : Integer;
 Begin
+    { Reproduced on AD21 even after destroying the iterator first. The
+      bulk label path can block the UI thread; Try/Except cannot time it
+      out. Refuse before reading components or opening an edit. }
+    Version := '';
+    Try Version := Client.GetProductVersion; Except End;
+    Dot := Pos('.', Version);
+    If Dot > 0 Then Major := StrToIntDef(Copy(Version, 1, Dot - 1), 0)
+    Else Major := StrToIntDef(Version, 0);
+    If Major < 22 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNSUPPORTED',
+            'Bulk component label visibility is disabled on Altium Designer 21 '
+            + 'and earlier because it can hang the PCB editor. No changes were made. '
+            + 'Use the editor to change labels on this version.');
+        Exit;
+    End;
     Board := Nil;
     Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
@@ -4765,7 +4786,9 @@ Begin
     UpdatedNames := 0;
     UpdatedComments := 0;
 
-    PcbBeginEdit(0);
+    { AD21 can hang when NameOn/CommentOn changes the collection being
+      walked. Snapshot matches and destroy the iterator before any write. }
+    Comps := TInterfaceList.Create;
     Try
         Iter := Board.BoardIterator_Create;
         Try
@@ -4788,31 +4811,64 @@ Begin
                             Continue;
                         End;
                     End;
-                    Inc(Matched);
-                    If SetNames And (Comp.NameOn <> NamesOn) Then
-                    Begin
-                        Comp.NameOn := NamesOn;
-                        Inc(UpdatedNames);
-                    End;
-                    If SetComments And (Comp.CommentOn <> CommentsOn) Then
-                    Begin
-                        Comp.CommentOn := CommentsOn;
-                        Inc(UpdatedComments);
-                    End;
+                    Comps.Add(Comp);
                 Except NoteWriteFailed('NameOn/CommentOn'); End;
                 Obj := Iter.NextPCBObject;
             End;
         Finally
             Board.BoardIterator_Destroy(Iter);
         End;
+        Matched := Comps.Count;
+        Failed := 0;
+        If Matched > 0 Then
+        Begin
+            PcbBeginEdit(0);
+            Try
+                For I := 0 To Comps.Count - 1 Do
+                Begin
+                    Comp := Comps.Items[I];
+                    Ok := True;
+                    Try
+                        Comp.BeginModify;
+                        Try
+                            If SetNames And (Comp.NameOn <> NamesOn) Then
+                            Begin
+                                Comp.NameOn := NamesOn;
+                                If Comp.NameOn = NamesOn Then Inc(UpdatedNames)
+                                Else Ok := False;
+                            End;
+                            If SetComments And (Comp.CommentOn <> CommentsOn) Then
+                            Begin
+                                Comp.CommentOn := CommentsOn;
+                                If Comp.CommentOn = CommentsOn Then Inc(UpdatedComments)
+                                Else Ok := False;
+                            End;
+                        Finally
+                            Comp.EndModify;
+                        End;
+                    Except
+                        Ok := False;
+                        NoteWriteFailed('NameOn/CommentOn');
+                    End;
+                    If Not Ok Then Inc(Failed);
+                End;
+            Finally
+                PcbEndEdit(0);
+            End;
+        End;
     Finally
-        PcbEndEdit(0);
+        { The script host owns this list. Freeing Altium interface lists
+          releases board references through COM and can fault in oleaut32. }
     End;
 
     Try Board.GraphicallyInvalidate; Except End;
+    If (UpdatedNames > 0) Or (UpdatedComments > 0) Then
+        MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         JsonObj(
+            JsonBool('success', Failed = 0) + ',' +
+            JsonInt('failed', Failed) + ',' +
             JsonInt('matched', Matched) + ',' +
             JsonInt('updated_names', UpdatedNames) + ',' +
             JsonInt('updated_comments', UpdatedComments)
@@ -8477,10 +8533,11 @@ Var
     Model : IPCB_Model;
     ModelPath, LayerStr, Why : String;
     BodyLayer : TLayer;
-    Standoff, CurX, CurY : Double;
+    Standoff : Double;
     BodyX, BodyY : Double;
-    DidStandoff, DidMove : Boolean;
+    DidStandoff, DidMove, PositionOk : Boolean;
     ReadBackX, ReadBackY : Double;
+    BeforeBox, AfterBox : TCoordRect;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     If ModelPath = '' Then
@@ -8547,6 +8604,13 @@ Begin
             Exit;
         End;
 
+        { STEP height belongs to the model, not the extruded body's
+          StandoffHeight property. Same tested path as Lib_Link3DModel. }
+        If Standoff <> 0 Then
+        Begin
+            Model.SetState(0, 0, 0, MilsToCoordF(Standoff));
+            DidStandoff := True;
+        End;
         Body.SetState_FromModel;
         Body.Model := Model;
 
@@ -8568,31 +8632,21 @@ Begin
 
         Try Body.Layer := BodyLayer; Except NoteWriteFailed('3D body Layer'); End;
 
-        { MOVED, NOT ASSIGNED. Lib_Link3DModel positions a body with
-          MoveByXY, which is inherited from IPCB_Primitive and already
-          called by PCB_ReplicateLayout, so it cannot be an undeclared
-          identifier. Writing x and y directly on a body is not something
-          this codebase has ever done successfully, and it was the other
-          half of the crash.
-
-          The delta is computed from where the factory actually put the
-          body rather than assuming it starts at the origin. }
-        Try
-            CurX := CoordToMilsF(Body.x);
-            CurY := CoordToMilsF(Body.y);
-        Except
-            CurX := 0;
-            CurY := 0;
-        End;
+        { A newly loaded model is at its own authored origin. x/y are
+          offsets from that origin, not the first vertex of its outline.
+          IPCB_ComponentBody has NO x/y member on AD21: even a READ inside
+          Try/Except halts the script and leaves this transaction open.
+          Verify translation through the supported primitive bounds. }
+        BeforeBox := Body.BoundingRectangle;
         { Inside the body's modify bracket, now that it has a board. Moved   }
         { without it, the spatial index kept the body at the origin, so it   }
         { could not be picked where it was drawn (measured on AD 26.10).     }
-        If (BodyX <> CurX) Or (BodyY <> CurY) Then
+        If (BodyX <> 0) Or (BodyY <> 0) Then
             Try
                 Body.BeginModify;
                 Try
-                    Body.MoveByXY(MilsToCoordF(BodyX - CurX),
-                                  MilsToCoordF(BodyY - CurY));
+                    Body.MoveByXY(MilsToCoordF(BodyX),
+                                  MilsToCoordF(BodyY));
                     DidMove := True;
                 Finally
                     Body.EndModify;
@@ -8600,11 +8654,6 @@ Begin
                 Body.GraphicallyInvalidate;
             Except { the move flag in the reply reports it } End;
 
-        If Standoff <> 0 Then
-            Try
-                Body.StandoffHeight := MilsToCoordF(Standoff);
-                DidStandoff := True;
-            Except { the standoff flag in the reply reports it } End;
     Finally
         PcbEndEdit(0);
     End;
@@ -8612,24 +8661,26 @@ Begin
     { READ THE POSITION BACK. The placement is the one thing a caller cannot
       check without opening the 3D view, and this tool exists because a
       session spent a long time unable to see whether anything had landed. }
-    ReadBackX := BodyX;
-    ReadBackY := BodyY;
-    Try
-        ReadBackX := CoordToMilsF(Body.x);
-        ReadBackY := CoordToMilsF(Body.y);
-    Except End;
+    AfterBox := Body.BoundingRectangle;
+    ReadBackX := CoordToMilsF(AfterBox.Left - BeforeBox.Left);
+    ReadBackY := CoordToMilsF(AfterBox.Bottom - BeforeBox.Bottom);
+    PositionOk := (Abs(ReadBackX - BodyX) < 0.01)
+                  And (Abs(ReadBackY - BodyY) < 0.01);
 
     MarkDocDirtyByPath(Board.FileName);
 
     { The one thing a caller cannot check from here. }
     NoteNextStep('Look at it before trusting the placement: obj_switch_view '
         + '3d. The body sits at the model''s own origin, so where it lands '
-        + 'depends on how the STEP was authored. obj_modify on '
-        + 'eComponentBodyObject moves it, and obj_delete removes it.');
+        + 'depends on how the STEP was authored. BoundsLeft/Bottom/Right/Top '
+        + 'read its actual extent; obj_delete can remove it.');
 
     Result := BuildSuccessResponse(RequestId,
         JsonObj(
-            JsonBool('success', True) + ',' +
+            JsonBool('success', PositionOk) + ',' +
+            JsonBool('placed', True) + ',' +
+            JsonBool('position_verified', PositionOk) + ',' +
+            JsonStr('position_reference', 'model_origin_offset') + ',' +
             JsonStr('model_path', ModelPath) + ',' +
             JsonFloat('x', ReadBackX) + ',' +
             JsonFloat('y', ReadBackY) + ',' +
@@ -8638,10 +8689,12 @@ Begin
             JsonBool('standoff_applied', DidStandoff) + ',' +
             JsonBool('moved', DidMove) + ',' +
             JsonBool('rotation_applied', False) + ',' +
-            JsonStr('note', 'rotation is not settable from here: '
-                + 'IPCB_ComponentBody exposes no Rotation, and the model-level '
-                + 'SetState signature is undocumented. Rotate in the editor if '
-                + 'the orientation is wrong.')
+            JsonRaw('bounds', '{' + JsonFloat('left', CoordToMilsF(AfterBox.Left))
+                + ',' + JsonFloat('bottom', CoordToMilsF(AfterBox.Bottom))
+                + ',' + JsonFloat('right', CoordToMilsF(AfterBox.Right))
+                + ',' + JsonFloat('top', CoordToMilsF(AfterBox.Top)) + '}') + ',' +
+            JsonStr('note', 'x/y are verified offsets from the STEP model origin; '
+                + 'authored geometry coordinates are preserved. Rotation is unchanged.')
         ));
 End;
 
@@ -30049,6 +30102,26 @@ Begin
     Result := UpperCase(R);
 End;
 
+{ These SDK calls were measured on AD25+, but the provider-refresh call
+  halted AD21. Its exact exception was not captured. Do not probe it.
+  Refuse before touching the late-bound API, including after stack writes. }
+Function PCBStackManagerProblem(Dummy : Integer) : String;
+Var
+    Ver : String;
+    Major : Integer;
+Begin
+    Ver := '';
+    Try Ver := Client.GetProductVersion; Except Ver := ''; End;
+    Major := 0;
+    If Pos('.', Ver) > 1 Then
+        Major := StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0);
+    Result := '';
+    If Major < 25 Then
+        Result := 'Layer Stack Manager SDK operations need Altium Designer 25 or later; '
+            + 'this build reports "' + Ver + '". Use pcb_physical_stack for '
+            + 'the board stack. No manager operation was attempted.';
+End;
+
 Function PCB_LayerStackManager(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
@@ -30064,7 +30137,7 @@ Var
     IPr : ILsmSdkImpedanceProfile;
     ByGuid, ById : TStringList;
     Model, Layers, Props, Names, Pairs, Spans, Drills, Profiles, Extra : String;
-    PropName, PropValue, LName, LGuid, SpanName : String;
+    PropName, PropValue, LName, LGuid, SpanName, Problem : String;
     I, J, LayerCount, PropCount, StartId, StopId : Integer;
 Begin
     Model := LowerCase(Trim(ExtractJsonValue(Params, 'include_model')));
@@ -30081,6 +30154,12 @@ Begin
         Exit;
     End;
 
+    Problem := PCBStackManagerProblem(0);
+    If Problem <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNSUPPORTED', Problem);
+        Exit;
+    End;
     LSM := LayerStackManager;
     { The provider is cached: without dropping it first, a read after a     }
     { stack change returns the old values.                                  }
@@ -30247,7 +30326,7 @@ End;
 Function PCB_MoveLayer(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
-    LayerName, Dir, StepsStr, Names, LayerGuid, StackId, StackName, Before : String;
+    LayerName, Dir, StepsStr, Names, LayerGuid, StackId, StackName, Before, Problem : String;
     { The manager, its document, editors and provider are not in the script }
     { engine's identifier table: late bound through Variants.               }
     LSM, Doc, DocEd, LayEd, StEd, LSP, LSI, LI : Variant;
@@ -30285,6 +30364,13 @@ Begin
         Exit;
     End;
     Alone := LowerCase(Trim(ExtractJsonValue(Params, 'alone'))) = 'true';
+
+    Problem := PCBStackManagerProblem(0);
+    If Problem <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNSUPPORTED', Problem);
+        Exit;
+    End;
 
     { The provider is cached and keeps answering with the stack as it was   }
     { before the last change: drop it first, so the GUID read is current.   }
@@ -30418,7 +30504,7 @@ End;
 Function PCB_LoadStackManagerModel(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
-    Model, Path : String;
+    Model, Path, Problem : String;
     LSM, Doc, DocEd, StEd : Variant;
     Su : ILsmSdkStackup;
     Sts : ILsmSdkLayerStackCollection;
@@ -30440,6 +30526,12 @@ Begin
         Exit;
     End;
 
+    Problem := PCBStackManagerProblem(0);
+    If Problem <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNSUPPORTED', Problem);
+        Exit;
+    End;
     LSM := LayerStackManager;
     LSM.RemoveLayerStackProvider(Board);
     Doc := LSM.OpenDocumentFromPcb(Board);

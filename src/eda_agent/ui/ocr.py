@@ -32,15 +32,23 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 
+import psutil
+
 from ..noconsole import no_window
+from ..atomicfile import replace_with_retry
 from . import windows as win
 
 #: PrintWindow flag. Renders the full window content including anything
 #: drawn by DWM, which a plain BitBlt of the screen would miss when the
 #: window is partly obscured.
 _PW_RENDERFULLCONTENT = 0x00000002
+
+# PrintWindow sends work to the target UI thread and has no timeout. A
+# hung Altium command must not also hang screenshots and crash recovery.
+_CAPTURE_TIMEOUT_S = 5.0
 
 #: WinRT's OCR pipeline is async, and PowerShell 5.1 cannot await an
 #: IAsyncOperation directly, hence the AsTask reflection dance. Kept as
@@ -99,8 +107,77 @@ def available() -> bool:
     return os.name == "nt"
 
 
-def capture_png(hwnd: int, path: str, enlarge: int = 1) -> bool:
-    """Render a window to a PNG. True when it worked.
+def _capture_command(hwnd: int, path: str, enlarge: int) -> list[str]:
+    return [sys.executable, "-m", "eda_agent.ui.ocr", str(hwnd), path,
+            str(enlarge)]
+
+
+def _run_capture(command: list[str], timeout: float) -> int:
+    proc = subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, **no_window())
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Windows' venv python.exe may be a launcher with a second Python
+        # process underneath it. Kill descendants before their parent, while
+        # the relationship is still available, then wait for their exits.
+        children = []
+        try:
+            children = psutil.Process(proc.pid).children(recursive=True)
+        except psutil.Error:
+            pass
+        for child in reversed(children):
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        proc.kill()
+        proc.wait(timeout=1)
+        psutil.wait_procs(children, timeout=1)
+        raise
+
+
+def capture_png(hwnd: int, path: str, enlarge: int = 1, *,
+                timeout: float = _CAPTURE_TIMEOUT_S) -> bool:
+    """Render a window to a PNG within ``timeout`` seconds.
+
+    PrintWindow can wait forever for an unresponsive UI thread. Run it in
+    a disposable hidden process, terminating its process tree on timeout
+    with up to two seconds for exit cleanup. A thread timeout cannot release
+    a stalled PrintWindow call. Failed captures leave an
+    existing destination untouched and remove their partial output.
+
+    ``enlarge`` is for OCR; ordinary screenshots retain their real pixels.
+    """
+    if timeout <= 0 or not available():
+        return False
+    staged = ""
+    try:
+        # Same directory allows an atomic replace, including destinations
+        # on a different drive from the system temporary directory.
+        fd, staged = tempfile.mkstemp(
+            prefix=".eda-capture-", suffix=".png",
+            dir=os.path.dirname(os.path.abspath(path)))
+        os.close(fd)
+        result = _run_capture(
+            _capture_command(int(hwnd), staged, int(enlarge)),
+            timeout=timeout)
+        if result != 0 or os.path.getsize(staged) == 0:
+            return False
+        replace_with_retry(staged, path)
+        return True
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    finally:
+        if staged:
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+
+
+def _capture_png_inline(hwnd: int, path: str, enlarge: int = 1) -> bool:
+    """Worker-only Win32 capture. Never call in the MCP process.
 
     ``enlarge`` multiplies the size, which only the text recogniser
     wants; a screenshot stays at the window's real pixels so that it can
@@ -154,6 +231,16 @@ def capture_png(hwnd: int, path: str, enlarge: int = 1) -> bool:
         src.DeleteDC()
         win32gui.ReleaseDC(hwnd, window_dc)
         win32gui.DeleteObject(bitmap.GetHandle())
+
+
+def _capture_worker(argv: list[str]) -> int:
+    """The child process entry point; no GUI or input is synthesized."""
+    if len(argv) != 3:
+        return 2
+    try:
+        return 0 if _capture_png_inline(int(argv[0]), argv[1], int(argv[2])) else 1
+    except Exception:                              # noqa: BLE001
+        return 1
 
 
 def read_window_text(hwnd: int, timeout: float = 30.0) -> list:
@@ -227,3 +314,7 @@ def _recognise(hwnd: int, timeout: float, words: bool) -> list:
             os.rmdir(tmp)
         except OSError:
             pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(_capture_worker(sys.argv[1:]))

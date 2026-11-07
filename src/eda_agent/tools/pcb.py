@@ -14,6 +14,7 @@ from typing import Any, Optional, Union
 from pydantic import ValidationError
 
 from ..bridge import get_bridge
+from ..bridge.exceptions import AltiumError
 from ..design import fab_library
 from ..placement import (
     BoardRegion,
@@ -119,8 +120,15 @@ async def sync_stack_manager(bridge: Any, dry_run: bool = False) -> dict[str, An
     stack, which run it after a change: a board without the manager's copy,
     or one already in step, reads in step and nothing is loaded.
     """
-    lsm = await bridge.send_command_async(
-        "pcb.layer_stack_manager", {"include_model": "records"})
+    try:
+        lsm = await bridge.send_command_async(
+            "pcb.layer_stack_manager", {"include_model": "records"})
+    except AltiumError as exc:
+        if exc.code != "UNSUPPORTED":
+            raise
+        # Direct board-stack edits work on AD21. An optional manager sync
+        # must not turn their successful write into an apparent failure.
+        return {"supported": False, "skipped": True, "reason": exc.message}
     if not isinstance(lsm, dict) or "layers" not in lsm:
         return lsm
     physical = await bridge.send_command_async("pcb.physical_stack", {})
@@ -7182,11 +7190,16 @@ def register_pcb_tools(mcp):
 
         At least one of ``designators`` / ``comments`` must be supplied.
 
+        Altium 21 and earlier return UNSUPPORTED before any board access:
+        this bulk operation can hang that editor even with a snapshot
+        of the component iterator. Change labels in the editor there.
+
         Returns:
             Dict with:
               - ``matched``: components inspected (after filter)
               - ``updated_names``: components whose NameOn flipped
               - ``updated_comments``: components whose CommentOn flipped
+              - ``failed``: components whose writes failed readback
         """
         if designators is None and comments is None:
             return {"ok": False,
@@ -10136,17 +10149,18 @@ def register_pcb_tools(mcp):
 
         Args:
             model_path: absolute path to the .step / .stp file.
-            x: X of the model's own origin in mils; where the body lands
-                depends on how the STEP was authored, so check it against
-                a known feature.
-            y: Y of the model's origin in mils.
+            x: X translation from the STEP's authored coordinates, in mils.
+                Nonzero internal model coordinates are preserved.
+            y: Y translation from the STEP's authored coordinates, in mils.
             layer: board layer to attach it to.
-            standoff_height: underside height above the board, mils.
+            standoff_height: additional model Z translation, in mils.
 
         Returns:
             ``{"success", "model_path", "x", "y", "layer",
             "standoff_height", "standoff_applied", "rotation_applied",
-            "note"}``; x and y are read back from the placed body.
+            "note"}``; x and y are verified by the change in primitive
+            bounds. ``position_verified`` reports that check; ``bounds``
+            contains the placed outline bounds. No body X/Y member is used.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {

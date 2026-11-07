@@ -59,7 +59,6 @@ def test_the_base_interface_is_never_asked_for_a_position(source: str):
     ("ePadObject", "Pad."),
     ("eViaObject", "Via."),
     ("eComponentObject", "Comp."),
-    ("eComponentBodyObject", "Body."),
     ("eTextObject", "Txt."),
     ("eArcObject", "Arc."),
     ("eFillObject", "Fill."),
@@ -72,6 +71,12 @@ def test_each_type_is_read_through_a_local_of_its_own_type(
     assert len(block) == 2, f"{oid} has no branch"
     body = block[1].split("End", 1)[0]
     assert member in body, f"{oid} is not read through a {member} local"
+
+
+def test_step_body_position_is_unavailable_instead_of_reading_missing_members(resolver):
+    body = resolver.split("Oid = eComponentBodyObject Then", 1)[1].split("End", 1)[0]
+    assert "Found := False" in body
+    assert "Body.x" not in body and "Body.y" not in body
 
 
 @pytest.mark.parametrize("oid,x_member,y_member", [

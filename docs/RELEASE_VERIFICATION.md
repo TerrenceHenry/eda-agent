@@ -1,4 +1,65 @@
-# Release verification: 2026.11.07.1
+# Release verification: 2026.11.07.4
+
+This revision addresses the AD21 incident paths: reject unsupported stack-manager
+SDK calls before entering them, export a footprint through a fresh library,
+gate newer pad-shape/cache members, translate STEP bodies through primitive
+bounds rather than unsupported x/y members, refuse bulk label changes on AD21
+and snapshot components before toggling their labels on newer hosts, and bound
+window capture in a disposable process. Regression
+checks do not establish native Altium compatibility; record scratch-document
+verification separately below.
+
+AD21 scratch verification (2026-11-07): the deployed unit stamps and
+`application.ping` confirmed the patched scripts. Two STEP imports into a
+new free PCB passed XY bounds readback: authored coordinates at zero offset,
+then a 100/200 mil translation with a 50 mil model Z setting. The PCB saved
+normally, demonstrating the transaction closed. The model Z value was written,
+not independently measured. All three manager SDK entry points returned
+`UNSUPPORTED` and direct physical-stack reading continued to work.
+
+The first iterator-only visibility fix still hung a disposable full-assembly
+copy. This is why the final revision refuses the entire bulk visibility
+command on AD21 and earlier before accessing any board. Its internal hang
+cause remains undetermined. The new capture worker returned false in 5.19 s
+against that hung window and left no child process behind. Altium was left
+open for user-controlled recovery. After recovery, the final visibility
+refusal returned in 0.063 s on the same disposable assembly, followed by a
+successful ping. A scratch dielectric write/read/restore succeeded with the
+manager sync explicitly skipped. The patched pad query read three pads
+(SMD, drilled and slotted) without a script fault.
+
+Native export verification used a fresh library containing only the requested
+footprint. After closing and reopening the exported file, all three pad
+records and the STEP body record matched the source exactly; the saved source
+library hash was unchanged. This exposed a residual bridge edit marker after
+save; the exporter now clears it only after the fresh output exists. A second
+fresh export then closed normally without discarding changes and reopened
+with matching geometry. Live unit stamps matched the final deployed build.
+Responsive window capture also succeeded in 0.656 s. Scratch documents were
+closed and the polling loop detached with zero save attempts. No project
+design file was changed. These runs cover AD21; newer host behavior remains
+subject to its own native verification.
+
+Capture timeout cleanup also covers Windows venv launcher descendants. The
+real-process regressions exercise both a stalled worker and a worker spawning
+a further stalled child; cleanup terminates descendants before the parent and
+allows at most two additional seconds to wait for exits.
+
+Final required check (`scripts/check.py --base HEAD`): 2,290 passed,
+60 skipped and 35 subtests passed; Pascal lint: zero errors and warnings.
+The ignored monolithic build was regenerated from the current units before
+the clean run. Skipped checks do not establish native acceptance.
+
+After reconnecting the desktop MCP client, verification through that chat's
+own tools confirmed the Python fixes too: a dry-run stack sync returned
+`supported=false, skipped=true` rather than raising the unsupported-SDK error.
+A successful screenshot spawned the new `eda_agent.ui.ocr` worker under the
+chat's MCP process, and the worker exited cleanly. An earlier fresh standalone
+MCP check had passed, but the existing chat still used its previous Python
+process until the host restart and next-turn refresh; the final check used
+the actual reconnected chat. All 399 protected project/design file hashes
+matched their original baseline. Private design files, images, scratch
+fixtures and machine-specific logs are excluded from the change set.
 
 Fork build `0.8.1.post1` removes the sponsorship banner and heart from the
 status window. Background update checks are disabled by default; manual
@@ -427,7 +488,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.11.07.1`, `version_match` =
+Expect `altium_script_version` = `2026.11.07.4`, `version_match` =
 `true`, and `mcp_server_version` = `0.8.1.post1`.
 
 Those are two different versions and they fail differently.

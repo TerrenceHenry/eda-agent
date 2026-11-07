@@ -2189,6 +2189,22 @@ Begin
     Result := Major >= 25;
 End;
 
+{ These pad additions are verified on AD 26. On AD 21 eCustomShape is an
+  undeclared identifier and halts the script even inside Try/Except.
+  The side-specific cache fields are likewise only measured on AD 26;
+  older versions report them as unavailable rather than probing them. }
+Function LibraryAdvancedPadApiSupported(Dummy : Integer) : Boolean;
+Var
+    Ver : String;
+    Major : Integer;
+Begin
+    Ver := '';
+    Try Ver := Client.GetProductVersion; Except Ver := ''; End;
+    Major := 0;
+    If Pos('.', Ver) > 1 Then Major := StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0);
+    Result := Major >= 26;
+End;
+
 { A pad's top paste opening flag, as JSON: true, false, or null when the     }
 { flag cannot be read. The expansion is a separate control (issue #80).     }
 Function PadPasteTopJson(Pad : IPCB_Pad) : String;
@@ -4230,8 +4246,8 @@ Begin
                   had just written with
                   SetState_StackShapeOnLayer(..., eRoundedRectangular). }
                 Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'roundrectangle'
-                Else If Pad.TopShape = eCustomShape Then ShapeStr := 'custom'
-                Else ShapeStr := 'round';
+                Else If LibraryAdvancedPadApiSupported(0) Then
+                    If Pad.TopShape = eCustomShape Then ShapeStr := 'custom';
             Except End;
 
             LayerStr := 'top';
@@ -4463,8 +4479,8 @@ Begin
                                 If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
                                 Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
                                 Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'roundrectangle'
-                                Else If Pad.TopShape = eCustomShape Then ShapeStr := 'custom'
-                                Else ShapeStr := 'round';
+                                Else If LibraryAdvancedPadApiSupported(0) Then
+                                    If Pad.TopShape = eCustomShape Then ShapeStr := 'custom';
                             Except End;
                             LayerStr := 'top';
                             Try
@@ -12508,12 +12524,14 @@ End;
 Function CacheStateName(Pad : IPCB_Pad; Mask : Boolean) : String;
 Var
     State : Integer;
+    Cache : TPadCache;
 Begin
     Result := 'unknown';
     State := -1;
     Try
-        If Mask Then State := Pad.Cache.SolderMaskExpansionValid
-        Else State := Pad.Cache.PasteMaskExpansionValid;
+        Cache := Pad.GetState_Cache;
+        If Mask Then State := Cache.SolderMaskExpansionValid
+        Else State := Cache.PasteMaskExpansionValid;
     Except End;
     If State = eCacheManual Then Result := 'manual'
     Else If State = eCacheValid Then Result := 'valid'
@@ -12536,6 +12554,7 @@ Var
     PadAddr : String;
     LibPath, FocusedPath, FpWanted, FpName, FpDescr : String;
     ShapeStr, HoleStr, LayerStr, PadsJson, RespJson, ExpSrc : String;
+    ExpBottomJson, ExpSeparateJson : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -12646,8 +12665,8 @@ Begin
                 If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
                 Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
                 Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'roundrectangle'
-                Else If Pad.TopShape = eCustomShape Then ShapeStr := 'custom'
-                Else ShapeStr := 'round';
+                Else If LibraryAdvancedPadApiSupported(0) Then
+                    If Pad.TopShape = eCustomShape Then ShapeStr := 'custom';
             Except End;
 
             CornerPct := 0;
@@ -12744,16 +12763,21 @@ Begin
             Try PadsJson := PadsJson + ',"bottom_w_mm":' + FloatToJsonStr(CoordToMM(Pad.BotXSize))
                 + ',"bottom_h_mm":' + FloatToJsonStr(CoordToMM(Pad.BotYSize));
             Except End;
-            Try PadsJson := PadsJson + ',"mask_from_hole_edge":' + BoolToJsonStr(Pad.SolderMaskExpansionFromHoleEdge);
-            Except PadsJson := PadsJson + ',"mask_from_hole_edge":null'; End;
+            If LibraryAdvancedPadApiSupported(0) Then
+            Begin
+                Try PadsJson := PadsJson + ',"mask_from_hole_edge":' + BoolToJsonStr(Pad.SolderMaskExpansionFromHoleEdge);
+                Except PadsJson := PadsJson + ',"mask_from_hole_edge":null'; End;
+            End
+            Else PadsJson := PadsJson + ',"mask_from_hole_edge":null';
 
             { Paste expansion: value + manual-vs-rule source. }
             ExpVal := 0;
             ExpSrc := 'rule';
             Try
-                If Pad.Cache.PasteMaskExpansionValid = eCacheManual Then
+                PadCache := Pad.GetState_Cache;
+                If PadCache.PasteMaskExpansionValid = eCacheManual Then
                 Begin
-                    ExpVal := CoordToMM(Pad.Cache.PasteMaskExpansion);
+                    ExpVal := CoordToMM(PadCache.PasteMaskExpansion);
                     ExpSrc := 'manual';
                 End;
             Except End;
@@ -12778,21 +12802,32 @@ Begin
             ExpVal := 0;
             ExpBottom := 0;
             ExpSeparate := False;
+            ExpBottomJson := 'null';
+            ExpSeparateJson := 'null';
             ExpSrc := 'rule';
             Try
                 PadCache := Pad.GetState_Cache;
-                ExpSeparate := PadCache.UseSeparateExpansions;
+                If LibraryAdvancedPadApiSupported(0) Then
+                Begin
+                    ExpSeparate := PadCache.UseSeparateExpansions;
+                    ExpSeparateJson := BoolToJsonStr(ExpSeparate);
+                    ExpBottomJson := FloatToJsonStr(ExpBottom);
+                End;
                 If PadCache.SolderMaskExpansionValid = eCacheManual Then
                 Begin
                     ExpVal := CoordToMM(PadCache.SolderMaskExpansion);
-                    ExpBottom := CoordToMM(PadCache.SolderMaskBottomExpansion);
+                    If LibraryAdvancedPadApiSupported(0) Then
+                    Begin
+                        ExpBottom := CoordToMM(PadCache.SolderMaskBottomExpansion);
+                        ExpBottomJson := FloatToJsonStr(ExpBottom);
+                    End;
                     ExpSrc := 'manual';
                 End;
             Except End;
             PadsJson := PadsJson +
                 ',"mask_expansion_mm":' + FloatToJsonStr(ExpVal) +
-                ',"mask_bottom_expansion_mm":' + FloatToJsonStr(ExpBottom) +
-                ',"mask_separate":' + BoolToJsonStr(ExpSeparate) +
+                ',"mask_bottom_expansion_mm":' + ExpBottomJson +
+                ',"mask_separate":' + ExpSeparateJson +
                 ',"mask_expansion_source":"' + ExpSrc + '"' +
                 ',"mask_expansion_state":"' + CacheStateName(Pad, True) + '"}';
 
@@ -13307,7 +13342,8 @@ Begin
                         If Pad.TopShape = eRectangular Then Str := 'rectangular'
                         Else If Pad.TopShape = eOctagonal Then Str := 'octagonal'
                         Else If Pad.TopShape = eRoundedRectangular Then Str := 'roundrect'
-                        Else If Pad.TopShape = eCustomShape Then Str := 'custom';
+                        Else If LibraryAdvancedPadApiSupported(0) Then
+                            If Pad.TopShape = eCustomShape Then Str := 'custom';
                     Except End;
                     CornerPct := 0;
                     If Str = 'roundrect' Then
@@ -17921,13 +17957,17 @@ End;
 
 {..............................................................................}
 { Lib_SaveFootprintLibrary - write one footprint of a PCB library to a new    }
-{ PCB library file of its own (IPCB_Library.SaveComponentWithLibrary).       }
+{ PCB library file of its own. Use the normal new-document + full-copy path;
+  the one-call library export stops the AD 21 scripting engine.            }
 { Params: library_path (optional), footprint_name, out_path (required).      }
 {..............................................................................}
 Function Lib_SaveFootprintLibrary(Params : String; RequestId : String) : String;
 Var
-    LibPath, FpWanted, OutPath : String;
-    PcbLib : IPCB_Library;
+    LibPath, FpWanted, OutPath, Problem : String;
+    PcbLib, DestLib : IPCB_Library;
+    Footprint, NewFP, Blank : IPCB_LibComponent;
+    OutDoc : IServerDocument;
+    J, Aligned : Integer;
     Said : Boolean;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
@@ -17945,18 +17985,119 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library at ' + LibPath);
         Exit;
     End;
-    If FootprintByName(PcbLib, FpWanted) = Nil Then
+    Footprint := FootprintByName(PcbLib, FpWanted);
+    If Footprint = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT',
             'Footprint not found in ' + LibPath + ': ' + FpWanted);
         Exit;
     End;
-    Said := PcbLib.SaveComponentWithLibrary(FpWanted, OutPath);
+    OutPath := CanonicalPathValue('path', OutPath);
+    If UpperCase(OutPath) = UpperCase(LibPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SAME_LIBRARY',
+            'The output path is the source library; nothing was exported.');
+        Exit;
+    End;
+    If UpperCase(ExtractFileExt(OutPath)) <> '.PCBLIB' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_PATH', 'out_path must name a .PcbLib');
+        Exit;
+    End;
+    If Client.GetDocumentByPath(OutPath) <> Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'ALREADY_OPEN',
+            'The output library is already open; choose a new output path.');
+        Exit;
+    End;
+    If FileExists(OutPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'OUTPUT_EXISTS',
+            'The output file already exists; choose a new output path.');
+        Exit;
+    End;
+    If Not DirectoryExists(ExtractFilePath(OutPath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_PATH',
+            'The output directory does not exist: ' + ExtractFilePath(OutPath));
+        Exit;
+    End;
+
+    If SaveHeldBack(OutPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SAVING_OFF',
+            'Saving is disabled; no destination library was created.');
+        Exit;
+    End;
+
+    { The source is never saved, renamed or pruned. All mutations below are
+      on the newly created, unshared destination document. }
+    OutDoc := Client.OpenNewDocument('PCBLIB', OutPath, ExtractFileName(OutPath), False);
+    If OutDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Could not create ' + OutPath);
+        Exit;
+    End;
+    OutDoc.SetFileName(OutPath);
+    Client.ShowDocument(OutDoc);
+    DestLib := PCBServer.GetCurrentPCBLibrary;
+    Problem := PcbLibPathProblem(DestLib, OutPath);
+    If Problem <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_LIBRARY', Problem);
+        Exit;
+    End;
+
+    PcbBeginEdit(0);
+    Try
+        { Some versions seed a blank component. Only this fresh document
+          is cleared, so the result always contains exactly one footprint. }
+        For J := DestLib.ComponentCount - 1 DownTo 0 Do
+        Begin
+            Blank := DestLib.GetComponent(J);
+            DestLib.RemoveComponent(Blank);
+            DestLib.DeRegisterComponent(Blank);
+        End;
+        NewFP := DestLib.CreateNewComponent;
+        If NewFP = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'COPY_FAILED', 'CreateNewComponent returned Nil');
+            Exit;
+        End;
+        Footprint.CopyTo(NewFP, eFullCopy);
+        Aligned := AlignCopiedFootprint(Footprint, NewFP);
+        NewFP.Name := FpWanted;
+        DestLib.RegisterComponent(NewFP);
+    Finally
+        PcbEndEdit(0);
+    End;
+    If (DestLib.ComponentCount <> 1) Or (FootprintByName(DestLib, FpWanted) = Nil) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COPY_FAILED',
+            'The destination does not contain exactly the requested footprint; it was not saved.');
+        Exit;
+    End;
+    MarkDocDirtyByPath(OutPath);
+    OutDoc.SetModified(True);
+    OutDoc.DoFileSave('');
+    Said := FileExists(OutPath);
+    If Not Said Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SAVED',
+            'The destination library could not be saved to ' + OutPath);
+        Exit;
+    End;
+    { A fresh output did not exist before DoFileSave. Its creation proves
+      the write, so do not leave the bridge's edit marker blocking close. }
+    ForgetDocEdited(OutPath);
     Result := BuildSuccessResponse(RequestId, JsonObj(
         JsonStr('library', LibPath) + ','
         + JsonStr('footprint_name', FpWanted) + ','
         + JsonStr('out_path', OutPath) + ','
-        + JsonBool('reported', Said)));
+        + JsonBool('reported', Said) + ','
+        + JsonStr('route', 'new_document_full_copy') + ','
+        + JsonInt('footprint_count', DestLib.ComponentCount) + ','
+        + JsonInt('primitives_realigned', Aligned)));
 End;
 
 { Lib_ExportModelStep - write one footprint body's 3D model to a STEP file    }
