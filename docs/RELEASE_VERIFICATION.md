@@ -213,7 +213,7 @@ works elsewhere cannot be an undeclared identifier:
 | 43, library check | `Sch_LibraryRuleChecker_Create`, `ShowReport`, `Duplicate_Pins`, `Missing_Footprint` on a library's rule checker | no, nowhere | low, writes a report file only; ran live |
 | 44, drill pair | `AddLayerPair` on the board | no, nowhere | medium, ran live; a copy and a non-copper layer are refused first |
 | 44, net display | `ShowNetConnects`, `HideNetConnects`, `LoopRemoval` on a net | no, nowhere | low, ran live, read back and restored |
-| 44, one footprint | `SaveComponentWithLibrary` on a library | no, nowhere | low, writes a file only; ran live |
+| 44, one footprint | `CopyTo`, `AlignCopiedFootprint`, `RegisterComponent` into a fresh library | yes, `Lib_CopyFootprint`, when copying between libraries | low, only the new destination is changed and saved; AD21 close/reopen verified |
 | 44, project library | `CreateLibraryFromProject` on a sheet | no, nowhere | low, writes a new library only; ran live |
 | 44, scope and output | `DM_SetHierarchyMode`, `DM_SetOutputPath` on a project | no, nowhere | medium, ran live, read back and restored |
 | 44, pin functions | `AddDefinedFunction`, `ClearDefinedFunctions` on a pin | no, nowhere | low, ran live and read back |
@@ -2814,9 +2814,23 @@ is an undeclared identifier to a script on both library kinds.
    by name in another case; one made again and deleted with `all`.
 3. **Net display.** GND's connection lines hidden and loop removal off,
    both read back, then restored; an unknown net listed in `not_found`.
-4. **One footprint.** `lib_save_footprint_library` wrote a 138 KB
-   library holding only that footprint, with the source's two pads; an
-   unknown footprint refused.
+4. **One footprint.** `lib_save_footprint_library` now creates a fresh
+   `.PcbLib` with `OpenNewDocument`, copies the requested footprint with
+   `CopyTo` and `eFullCopy`, realigns its primitives with
+   `AlignCopiedFootprint`, and registers it with `RegisterComponent`.
+   It checks the destination contains exactly that footprint before
+   `DoFileSave`; the source is never saved, renamed or pruned. This replaces
+   `SaveComponentWithLibrary`, which halted the AD21 script engine.
+   On a disposable source library, choose a new output path and expect
+   `route: "new_document_full_copy"` and `footprint_count: 1`. Close the
+   output normally without discarding changes, reopen it, and compare its
+   pad and STEP-body records with the source; verify the saved source hash
+   is unchanged. The AD21 run recorded above passed these checks with
+   three pads and a STEP body. For repeat acceptance, also check an unknown
+   footprint, the source path, an open or existing output, an invalid path,
+   and Saving off are refused before creating a destination. The original
+   AD26 run below used the old SDK route and a two-pad, 138 KB output; it
+   does not verify this replacement on newer hosts.
 5. **Project library.** With the sheets loaded,
    `proj_make_schematic_library` wrote and saved a library of the
    project's 15 placed symbols.
