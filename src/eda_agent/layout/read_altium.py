@@ -277,9 +277,9 @@ def _mask(o: dict, obj):
     """The solder mask the reply gives a pad or via; see LmMaskJson."""
     tent = o.get("tent") or [False, False]
     obj.tent_top, obj.tent_bottom = bool(tent[0]), bool(tent[1])
-    obj.mask_from_hole = bool(o.get("from_hole"))
+    obj.mask_from_hole = o.get("from_hole")
     if o.get("mask"):
-        obj.mask_manual = [_m(o["mask"][0]), _m(o["mask"][1])]
+        obj.mask_manual = [None if value is None else _m(value) for value in o["mask"]]
     return obj
 
 
@@ -602,11 +602,26 @@ def read_board(send: Send, page: int = PAGE,
 
     raw_copper = _paged(send, "copper", "copper", page)
     _copper(raw_copper, board)
-    # A script older than the mask read sends no tenting: the sliver check
-    # then says it did not run rather than take every via as open. Pads or
-    # vias, whichever the board has: a board of vias alone read as unread.
-    board.meta["mask_read"] = (any("tent" in p for p in raw_pads)
-                               or any("tent" in o for o in raw_copper if o.get("k") == "via"))
+    # Missing or explicitly unknown mask fields cannot support a sliver
+    # verdict or copying the board's usual via mask onto a newly routed via.
+    # Keep nullable values in the model and use the existing unread policy.
+    mask_objects = raw_pads + [o for o in raw_copper if o.get("k") == "via"]
+    board.meta["mask_read"] = bool(mask_objects) and all(
+        isinstance(o.get("tent"), list) and len(o["tent"]) == 2
+        and all(isinstance(value, bool) for value in o["tent"])
+        and isinstance(o.get("from_hole"), bool)
+        and "mask" in o
+        and (o["mask"] is None or (
+            isinstance(o["mask"], list) and len(o["mask"]) == 2
+            and all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                    for value in o["mask"])))
+        for o in mask_objects)
+    if not board.meta["mask_read"] and any(
+            ("from_hole" in o and o["from_hole"] is None)
+            or (isinstance(o.get("mask"), list) and any(value is None for value in o["mask"]))
+            for o in mask_objects):
+        board.meta["mask_unavailable_reason"] = (
+            "One or more pad/via mask fields are unavailable from the installed Altium version/API")
     _pour_nets(board)
     repair_pour_nets(board)
     clean_cutouts(board)

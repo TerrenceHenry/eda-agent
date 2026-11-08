@@ -90,6 +90,10 @@ def pad_shape(cx: float, cy: float, w: float, h: float, shape: str,
     ox, oy = _rot(offset[0], offset[1], rotation)
     cx, cy = cx + ox, cy + oy
     shape = (shape or "round").lower()
+    if shape == "unknown":
+        # The native reader could not identify this copper. A rectangle
+        # would invent its boundary and could produce a false DRC pass.
+        raise ValueError("Cannot calculate pad copper geometry: native pad shape is unknown")
     if shape in ("round", "rounded", "oval", "obround", "circle"):
         if abs(w - h) < 1e-9:
             return circle(cx, cy, w)

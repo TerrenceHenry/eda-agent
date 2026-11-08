@@ -387,6 +387,10 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Query schematic OR PCB objects and read their properties.
 
+        Before AD25, PCB SolderMaskBottomExpansion, SolderMaskSeparate and
+        SolderMaskFromHoleEdge return string "null" (unknown, not zero/False/top).
+        Legacy SolderMaskExpansion remains available.
+
         Args:
             object_type: Altium object type constant.
                 Schematic: "eNetLabel", "ePort", "ePowerObject", "eSchComponent",
@@ -403,8 +407,7 @@ def register_generic_tools(mcp):
                 "eArcObject", "eFillObject", "eTextObject", "eRuleObject", "eDimensionObject",
                 "eSplitPlaneObject" (a plane layer's regions, with Net
                 and Layer),
-                "eConnectionObject" (the ratsnest: one line per unrouted
-                connection, with X1, Y1, X2, Y2, Layer1, Layer2 and Net)
+                "eConnectionObject" (unrouted ratsnest: X1,Y1,X2,Y2,Layer1,Layer2,Net)
             properties: Comma-separated property names to return.
 
                 SCHEMATIC objects use the dotted spelling:
@@ -414,15 +417,12 @@ def register_generic_tools(mcp):
                 Location is the body-side root);
                 "Designator.Text,Comment.Text,LibReference" for
                 components, "DisplayMode,DisplayModeCount" and
-                "DisplayModeNames" (the alternate drawing; names
-                ";"-separated from Normal; settable) and
-                "FootprintPinMap" (the current footprint model's pin map,
-                "(G:1),(D:2),(S:3)"; obj_modify also takes "G:1;D:2" and
-                merges by schematic pin, so a map cannot be cleared).
-                "ComponentKind" is its Component Type, read and set by
-                name: standard, mechanical, graphical, net_tie_bom,
-                net_tie_no_bom, standard_no_bom or jumper; with scope
-                "lib_component:NAME" it sets a library symbol's.
+                "DisplayModeNames" (alternate drawings, ";"-separated from Normal; settable) and
+                "FootprintPinMap" ("(G:1),(D:2),(S:3)"; obj_modify also takes
+                "G:1;D:2", merging by schematic pin; cannot clear a map).
+                "ComponentKind": standard, mechanical, graphical, net_tie_bom,
+                net_tie_no_bom, standard_no_bom or jumper; also settable on
+                library symbols with scope "lib_component:NAME".
                 "TextFontId" is a sheet or harness entry's label font. A
                 managed component also reads
                 "LibraryIdentifier,DesignItemId,ItemGUID,RevisionGUID"
@@ -583,7 +583,7 @@ def register_generic_tools(mcp):
         filter: str = "",
         items: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
-        """Apply ONE set of property values to every object matching ONE filter.
+        """Set properties on objects matching one filter.
 
         When each object needs a DIFFERENT value (10 pins to 10 positions,
         distinct designators), give ``items``: a list of
@@ -593,7 +593,11 @@ def register_generic_tools(mcp):
         stay applied. After a designator list, check the netlist: duplicate
         designators merge nets silently (proj_annotate renumbers without
         duplicates). With items a value in ``set`` may hold ';' but no
-        field may hold '~~'.
+        field may hold '~~'. Before AD25, SolderMaskBottomExpansion,
+        SolderMaskSeparate or SolderMaskFromHoleEdge requests return
+        UNSUPPORTED_VERSION before that PCB operation mutates objects;
+        earlier batch operations remain. Legacy SolderMaskExpansion works,
+        without separate bottom access.
 
         Args:
             object_type: Altium object type constant (see `obj_query`)
@@ -1404,6 +1408,9 @@ def register_generic_tools(mcp):
         No rollback: ops that ran before a failure stay applied. After a
         designator batch, check the netlist: duplicate designators merge
         nets silently. proj_annotate renumbers without duplicates.
+        Before AD25, PCB operations requesting SolderMaskBottomExpansion,
+        SolderMaskSeparate or SolderMaskFromHoleEdge return UNSUPPORTED_VERSION
+        before that operation changes any objects; earlier operations remain.
 
         Args:
             operations: List of operation dicts, each with:

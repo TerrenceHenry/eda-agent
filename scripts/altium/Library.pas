@@ -1705,6 +1705,7 @@ End;
 { a 0 there is reported as mid_unverified, not as a failed write.            }
 Function Lib_SetViaProperties(Params : String; RequestId : String) : String;
 Var
+    MaskPrim : IPCB_Primitive;
     LibPath, UnitsStr, TargetProblem, Addr, HoleStr, SizeStr, MidStr, BotStr : String;
     TentTopStr, TentBotStr, MaskStr, MaskBotStr, MaskSepStr, XStr, YStr : String;
     StackStr, EdgeStr, ManualStr, ModeName, SourceName : String;
@@ -1723,6 +1724,15 @@ Var
     SeenList : String;
     MadeManual, Ok : Boolean;
 Begin
+    If Not PadAdvancedMaskSupported(0) Then
+        If (ExtractJsonValue(Params, 'mask_bottom_expansion') <> '')
+            Or (ExtractJsonValue(Params, 'mask_separate') <> '')
+            Or (ExtractJsonValue(Params, 'mask_from_hole_edge') <> '') Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'UNSUPPORTED_VERSION',
+                'Separate mask expansions and hole-edge masks need Altium Designer 25 or later; nothing was changed');
+            Exit;
+        End;
     LibPath := ExtractJsonValue(Params, 'library_path');
     XStr := ExtractJsonValue(Params, 'x');
     YStr := ExtractJsonValue(Params, 'y');
@@ -1847,6 +1857,8 @@ Begin
     MadeManual := False;
     MidUnverified := False;
 
+    FoundPad := Found;
+    MaskPrim := FoundPad;
     PcbBeginEdit(0);
     Try
         PCBServer.SendMessageToRobots(Found.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
@@ -1944,8 +1956,10 @@ Begin
         If (EdgeStr = 'true') Or (EdgeStr = 'false') Then
         Begin
             Try
-                Found.SolderMaskExpansionFromHoleEdge := (EdgeStr = 'true');
-                If Found.SolderMaskExpansionFromHoleEdge <> (EdgeStr = 'true') Then Ok := False;
+                If PadAdvancedMaskSupported(0) Then
+                    MaskPrim.SolderMaskExpansionFromHoleEdge := (EdgeStr = 'true');
+                If PadAdvancedMaskSupported(0) Then
+                    If MaskPrim.SolderMaskExpansionFromHoleEdge <> (EdgeStr = 'true') Then Ok := False;
             Except Ok := False; End;
         End;
         { 6. Mask, through the pad cache: the source first (manual, or back
@@ -1970,12 +1984,15 @@ Begin
                     PadCache.SolderMaskExpansionValid := eCacheManual;
                     PadCache.SolderMaskExpansion := CoordFromUnits(StrToFloatDef(MaskStr, 0), UnitsStr);
                     If MaskBotStr = '' Then
-                        PadCache.SolderMaskBottomExpansion := PadCache.SolderMaskExpansion;
+                        If PadAdvancedMaskSupported(0) Then
+                            PadCache.SolderMaskBottomExpansion := PadCache.SolderMaskExpansion;
                 End;
                 If MaskBotStr <> '' Then
-                    PadCache.SolderMaskBottomExpansion := CoordFromUnits(StrToFloatDef(MaskBotStr, 0), UnitsStr);
+                    If PadAdvancedMaskSupported(0) Then
+                        PadCache.SolderMaskBottomExpansion := CoordFromUnits(StrToFloatDef(MaskBotStr, 0), UnitsStr);
                 If (MaskSepStr = 'true') Or (MaskSepStr = 'false') Then
-                    PadCache.UseSeparateExpansions := (MaskSepStr = 'true');
+                    If PadAdvancedMaskSupported(0) Then
+                        PadCache.UseSeparateExpansions := (MaskSepStr = 'true');
                 FoundPad.SetState_Cache := PadCache;
                 { Read the cache back: a value it did not keep is a failed
                   write, not a success. }
@@ -1984,13 +2001,16 @@ Begin
                     If Abs(PadCache.SolderMaskExpansion
                         - CoordFromUnits(StrToFloatDef(MaskStr, 0), UnitsStr)) > Tol Then Ok := False;
                 If MaskBotStr <> '' Then
-                    If Abs(PadCache.SolderMaskBottomExpansion
+                    If PadAdvancedMaskSupported(0) Then
+                        If Abs(PadCache.SolderMaskBottomExpansion
                         - CoordFromUnits(StrToFloatDef(MaskBotStr, 0), UnitsStr)) > Tol Then Ok := False;
                 If (MaskStr <> '') And (MaskBotStr = '') Then
-                    If Abs(PadCache.SolderMaskBottomExpansion
+                    If PadAdvancedMaskSupported(0) Then
+                        If Abs(PadCache.SolderMaskBottomExpansion
                         - CoordFromUnits(StrToFloatDef(MaskStr, 0), UnitsStr)) > Tol Then Ok := False;
                 If (MaskSepStr = 'true') Or (MaskSepStr = 'false') Then
-                    If PadCache.UseSeparateExpansions <> (MaskSepStr = 'true') Then Ok := False;
+                    If PadAdvancedMaskSupported(0) Then
+                        If PadCache.UseSeparateExpansions <> (MaskSepStr = 'true') Then Ok := False;
                 If ManualStr = 'true' Then
                     If PadCache.SolderMaskExpansionValid <> eCacheManual Then Ok := False;
                 If ManualStr = 'false' Then
@@ -2018,14 +2038,17 @@ Begin
         FoundPad := Found;
         PadCache := FoundPad.GetState_Cache;
         MaskStr := FloatToJsonStr(CoordToMM(PadCache.SolderMaskExpansion));
-        MaskBotStr := FloatToJsonStr(CoordToMM(PadCache.SolderMaskBottomExpansion));
-        MaskSepStr := BoolToJsonStr(PadCache.UseSeparateExpansions);
+        If PadAdvancedMaskSupported(0) Then
+            MaskBotStr := FloatToJsonStr(CoordToMM(PadCache.SolderMaskBottomExpansion));
+        If PadAdvancedMaskSupported(0) Then
+            MaskSepStr := BoolToJsonStr(PadCache.UseSeparateExpansions);
         CacheState := PadCache.SolderMaskExpansionValid;
         If CacheState = eCacheManual Then SourceName := 'manual'
         Else SourceName := 'rule';
     Except End;
     EdgeStr := 'null';
-    Try EdgeStr := BoolToJsonStr(Found.SolderMaskExpansionFromHoleEdge); Except End;
+    If PadAdvancedMaskSupported(0) Then
+        Try EdgeStr := BoolToJsonStr(MaskPrim.SolderMaskExpansionFromHoleEdge); Except End;
     ModeName := 'unknown';
     Try
         If Found.Mode = ePadMode_Simple Then ModeName := 'simple'
@@ -2187,22 +2210,6 @@ Begin
     Major := 0;
     If Pos('.', Ver) > 1 Then Major := StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0);
     Result := Major >= 25;
-End;
-
-{ These pad additions are verified on AD 26. On AD 21 eCustomShape is an
-  undeclared identifier and halts the script even inside Try/Except.
-  The side-specific cache fields are likewise only measured on AD 26;
-  older versions report them as unavailable rather than probing them. }
-Function LibraryAdvancedPadApiSupported(Dummy : Integer) : Boolean;
-Var
-    Ver : String;
-    Major : Integer;
-Begin
-    Ver := '';
-    Try Ver := Client.GetProductVersion; Except Ver := ''; End;
-    Major := 0;
-    If Pos('.', Ver) > 1 Then Major := StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0);
-    Result := Major >= 26;
 End;
 
 { A pad's top paste opening flag, as JSON: true, false, or null when the     }
@@ -4234,9 +4241,10 @@ Begin
                 Continue;
             End;
             If PadAddr <> '' Then SeenPads.Add(PadAddr);
-            ShapeStr := 'round';
+            ShapeStr := 'unknown';
             Try
-                If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
+                If Pad.TopShape = eRounded Then ShapeStr := 'round'
+                                Else If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
                 Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
                 { eRoundedRectangular is the PAD SHAPE. This used to test
                   eRoundRectangle, which is a SCHEMATIC object id. Both
@@ -4246,7 +4254,7 @@ Begin
                   had just written with
                   SetState_StackShapeOnLayer(..., eRoundedRectangular). }
                 Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'roundrectangle'
-                Else If LibraryAdvancedPadApiSupported(0) Then
+                Else If PadCustomShapeSupported(0) Then
                     If Pad.TopShape = eCustomShape Then ShapeStr := 'custom';
             Except End;
 
@@ -4474,12 +4482,13 @@ Begin
                         Pad := GrpIter.FirstPCBObject;
                         While Pad <> Nil Do
                         Begin
-                            ShapeStr := 'round';
+                            ShapeStr := 'unknown';
                             Try
-                                If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
+                                If Pad.TopShape = eRounded Then ShapeStr := 'round'
+                                Else If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
                                 Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
                                 Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'roundrectangle'
-                                Else If LibraryAdvancedPadApiSupported(0) Then
+                                Else If PadCustomShapeSupported(0) Then
                                     If Pad.TopShape = eCustomShape Then ShapeStr := 'custom';
                             Except End;
                             LayerStr := 'top';
@@ -12496,25 +12505,27 @@ Begin
     Except End;
 End;
 
-Function MaskBottomMM(Pad : IPCB_Pad) : Double;
+Function MaskBottomMM(Pad : IPCB_Pad) : String;
 Var
     Cache : TPadCache;
 Begin
-    Result := 0;
+    Result := 'null';
+    If Not PadAdvancedMaskSupported(0) Then Exit;
     Try
         Cache := Pad.GetState_Cache;
-        Result := CoordToMM(Cache.SolderMaskBottomExpansion);
+        Result := FloatToJsonStr(CoordToMM(Cache.SolderMaskBottomExpansion));
     Except End;
 End;
 
-Function MaskSeparate(Pad : IPCB_Pad) : Boolean;
+Function MaskSeparate(Pad : IPCB_Pad) : String;
 Var
     Cache : TPadCache;
 Begin
-    Result := False;
+    Result := 'null';
+    If Not PadAdvancedMaskSupported(0) Then Exit;
     Try
         Cache := Pad.GetState_Cache;
-        Result := Cache.UseSeparateExpansions;
+        Result := BoolToJsonStr(Cache.UseSeparateExpansions);
     Except End;
 End;
 
@@ -12660,12 +12671,13 @@ Begin
                 Continue;
             End;
             If PadAddr <> '' Then SeenPads.Add(PadAddr);
-            ShapeStr := 'round';
+            ShapeStr := 'unknown';
             Try
-                If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
+                If Pad.TopShape = eRounded Then ShapeStr := 'round'
+                                Else If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
                 Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
                 Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'roundrectangle'
-                Else If LibraryAdvancedPadApiSupported(0) Then
+                Else If PadCustomShapeSupported(0) Then
                     If Pad.TopShape = eCustomShape Then ShapeStr := 'custom';
             Except End;
 
@@ -12763,8 +12775,8 @@ Begin
             Try PadsJson := PadsJson + ',"bottom_w_mm":' + FloatToJsonStr(CoordToMM(Pad.BotXSize))
                 + ',"bottom_h_mm":' + FloatToJsonStr(CoordToMM(Pad.BotYSize));
             Except End;
-            If LibraryAdvancedPadApiSupported(0) Then
-            Begin
+            If PadAdvancedMaskSupported(0) Then
+                Begin
                 Try PadsJson := PadsJson + ',"mask_from_hole_edge":' + BoolToJsonStr(Pad.SolderMaskExpansionFromHoleEdge);
                 Except PadsJson := PadsJson + ',"mask_from_hole_edge":null'; End;
             End
@@ -12807,8 +12819,8 @@ Begin
             ExpSrc := 'rule';
             Try
                 PadCache := Pad.GetState_Cache;
-                If LibraryAdvancedPadApiSupported(0) Then
-                Begin
+                If PadAdvancedMaskSupported(0) Then
+                    Begin
                     ExpSeparate := PadCache.UseSeparateExpansions;
                     ExpSeparateJson := BoolToJsonStr(ExpSeparate);
                     ExpBottomJson := FloatToJsonStr(ExpBottom);
@@ -12816,8 +12828,8 @@ Begin
                 If PadCache.SolderMaskExpansionValid = eCacheManual Then
                 Begin
                     ExpVal := CoordToMM(PadCache.SolderMaskExpansion);
-                    If LibraryAdvancedPadApiSupported(0) Then
-                    Begin
+                    If PadAdvancedMaskSupported(0) Then
+                        Begin
                         ExpBottom := CoordToMM(PadCache.SolderMaskBottomExpansion);
                         ExpBottomJson := FloatToJsonStr(ExpBottom);
                     End;
@@ -12911,6 +12923,15 @@ Var
     Count, Failed, XOrg, YOrg : Integer;
     Ok : Boolean;
 Begin
+    If Not PadAdvancedMaskSupported(0) Then
+        If (ExtractJsonValue(Params, 'mask_bottom_expansion') <> '')
+            Or (ExtractJsonValue(Params, 'mask_separate') <> '')
+            Or (ExtractJsonValue(Params, 'mask_from_hole_edge') <> '') Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'UNSUPPORTED_VERSION',
+                'Separate mask expansions and hole-edge masks need Altium Designer 25 or later; nothing was changed');
+            Exit;
+        End;
     LibPath := ExtractJsonValue(Params, 'library_path');
     FpWanted := ExtractJsonValue(Params, 'footprint_name');
     PadWanted := ExtractJsonValue(Params, 'pad_name');
@@ -13258,8 +13279,10 @@ Begin
                     If (EdgeStr = 'true') Or (EdgeStr = 'false') Then
                     Begin
                         Try
-                            Pad.SolderMaskExpansionFromHoleEdge := (EdgeStr = 'true');
-                            If Pad.SolderMaskExpansionFromHoleEdge <> (EdgeStr = 'true') Then Ok := False;
+                            If PadAdvancedMaskSupported(0) Then
+                                Pad.SolderMaskExpansionFromHoleEdge := (EdgeStr = 'true');
+                            If PadAdvancedMaskSupported(0) Then
+                                If Pad.SolderMaskExpansionFromHoleEdge <> (EdgeStr = 'true') Then Ok := False;
                         Except Ok := False; End;
                     End;
 
@@ -13297,18 +13320,22 @@ Begin
                                 Cache.SolderMaskExpansionValid := eCacheManual;
                                 Cache.SolderMaskExpansion := CoordFromUnits(StrToFloatDef(Str, 0), UnitsStr);
                                 If ExtractJsonValue(Params, 'mask_bottom_expansion') = '' Then
-                                    Cache.SolderMaskBottomExpansion := Cache.SolderMaskExpansion;
+                                    If PadAdvancedMaskSupported(0) Then
+                                        Cache.SolderMaskBottomExpansion := Cache.SolderMaskExpansion;
                             End;
                             Str := ExtractJsonValue(Params, 'mask_bottom_expansion');
                             If Str <> '' Then
                             Begin
                                 Cache.SolderMaskExpansionValid := eCacheManual;
-                                Cache.SolderMaskBottomExpansion := CoordFromUnits(StrToFloatDef(Str, 0), UnitsStr);
-                                Cache.UseSeparateExpansions := True;
+                                If PadAdvancedMaskSupported(0) Then
+                                    Cache.SolderMaskBottomExpansion := CoordFromUnits(StrToFloatDef(Str, 0), UnitsStr);
+                                If PadAdvancedMaskSupported(0) Then
+                                    Cache.UseSeparateExpansions := True;
                             End;
                             Str := ExtractJsonValue(Params, 'mask_separate');
                             If Str <> '' Then
-                                Cache.UseSeparateExpansions := (Str = 'true');
+                                If PadAdvancedMaskSupported(0) Then
+                                    Cache.UseSeparateExpansions := (Str = 'true');
                             Pad.SetState_Cache := Cache;
                             Cache := Pad.GetState_Cache;
                             If (MaskManualStr = 'true') And (Cache.SolderMaskExpansionValid <> eCacheManual) Then Ok := False;
@@ -13337,19 +13364,21 @@ Begin
                         Else If Pad.Mode = ePadMode_LocalStack Then ModeName := 'top-middle-bottom'
                         Else If Pad.Mode = ePadMode_ExternalStack Then ModeName := 'full-stack';
                     Except End;
-                    Str := 'round';
+                    Str := 'unknown';
                     Try
-                        If Pad.TopShape = eRectangular Then Str := 'rectangular'
+                        If Pad.TopShape = eRounded Then Str := 'round'
+                        Else If Pad.TopShape = eRectangular Then Str := 'rectangular'
                         Else If Pad.TopShape = eOctagonal Then Str := 'octagonal'
                         Else If Pad.TopShape = eRoundedRectangular Then Str := 'roundrect'
-                        Else If LibraryAdvancedPadApiSupported(0) Then
+                        Else If PadCustomShapeSupported(0) Then
                             If Pad.TopShape = eCustomShape Then Str := 'custom';
                     Except End;
                     CornerPct := 0;
                     If Str = 'roundrect' Then
                         Try CornerPct := Pad.CRPercentage[eTopLayer]; Except End;
                     EdgeStr := 'null';
-                    Try EdgeStr := BoolToJsonStr(Pad.SolderMaskExpansionFromHoleEdge); Except End;
+                    If PadAdvancedMaskSupported(0) Then
+                        Try EdgeStr := BoolToJsonStr(Pad.SolderMaskExpansionFromHoleEdge); Except End;
 
                     If PadsJson <> '' Then PadsJson := PadsJson + ',';
                     PadsJson := PadsJson + '{"name":"' + EscapeJsonString(Pad.Name) + '"'
@@ -13371,8 +13400,8 @@ Begin
                         + ',"paste_expansion_state":"' + CacheStateName(Pad, False) + '"'
                         + ',"mask_expansion_state":"' + CacheStateName(Pad, True) + '"'
                         + ',"mask_expansion_mm":' + FloatToJsonStr(MaskTopMM(Pad))
-                        + ',"mask_bottom_expansion_mm":' + FloatToJsonStr(MaskBottomMM(Pad))
-                        + ',"mask_separate":' + BoolToJsonStr(MaskSeparate(Pad))
+                        + ',"mask_bottom_expansion_mm":' + MaskBottomMM(Pad)
+                        + ',"mask_separate":' + MaskSeparate(Pad)
                         + ',"mask_from_hole_edge":' + EdgeStr
                         + ',"paste_top_enabled":' + PadPasteTopJson(Pad)
                         + ',"all_writes_ran":' + BoolToJsonStr(Ok) + '}';
@@ -13430,11 +13459,13 @@ Begin
         If Cache.SolderMaskExpansionValid = eCacheManual Then Src := 'manual' Else Src := 'rule';
         Result := Result
             + ',"mask_expansion_mm":' + FloatToJsonStr(CoordToMM(Cache.SolderMaskExpansion))
-            + ',"mask_bottom_expansion_mm":' + FloatToJsonStr(CoordToMM(Cache.SolderMaskBottomExpansion))
-            + ',"mask_separate":' + BoolToJsonStr(Cache.UseSeparateExpansions)
+            + ',"mask_bottom_expansion_mm":' + MaskBottomMM(Via)
+            + ',"mask_separate":' + MaskSeparate(Via)
             + ',"mask_expansion_source":"' + Src + '"';
     Except End;
-    Try Result := Result + ',"mask_from_hole_edge":' + BoolToJsonStr(Via.SolderMaskExpansionFromHoleEdge); Except End;
+    If PadAdvancedMaskSupported(0) Then
+        Try Result := Result + ',"mask_from_hole_edge":' + BoolToJsonStr(Via.SolderMaskExpansionFromHoleEdge); Except End
+    Else Result := Result + ',"mask_from_hole_edge":null';
     Try
         Result := Result + ',"tenting_top":' + BoolToJsonStr(Via.IsTenting_Top)
             + ',"tenting_bottom":' + BoolToJsonStr(Via.IsTenting_Bottom);

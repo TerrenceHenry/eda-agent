@@ -75,6 +75,6 @@ def test_both_sides_are_written_and_read_back():
     body = load(ALTIUM / "PCB.pas", minimum=100)["PCB_SetViaSoldermaskRelief"]
     assert "Cache.SolderMaskBottomExpansion := Exp;" in body
     assert "Cache.SolderMaskExpansionValid := eCacheManual;" in body
-    tail = body[body.index("Via.SetState_Cache := Cache;"):]
-    assert "Cache := Via.GetState_Cache;" in tail
+    tail = body[body.index("MaskPrim.SetState_Cache := Cache;"):]
+    assert "Cache := MaskPrim.GetState_Cache;" in tail
     assert "Verified := Verified + 1" in tail

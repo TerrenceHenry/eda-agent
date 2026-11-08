@@ -694,6 +694,13 @@ Var
     AsPrim : IPCB_Primitive;
     Cache  : TPadCache;
 Begin
+    If Not PadAdvancedMaskSupported(0) Then
+        If (PropName = 'SolderMaskBottomExpansion')
+            Or (PropName = 'SolderMaskSeparate') Or (PropName = 'SolderMaskFromHoleEdge') Then
+        Begin
+            Result := 'null';
+            Exit;
+        End;
     Result := '';
     If Obj.ObjectId = eViaObject Then
     Begin
@@ -731,6 +738,13 @@ Var
     AsPrim : IPCB_Primitive;
     Cache  : TPadCache;
 Begin
+    If Not PadAdvancedMaskSupported(0) Then
+        If (PropName = 'SolderMaskBottomExpansion')
+            Or (PropName = 'SolderMaskSeparate') Or (PropName = 'SolderMaskFromHoleEdge') Then
+        Begin
+            Result := False;
+            Exit;
+        End;
     Result := False;
     If Obj.ObjectId = eViaObject Then
     Begin
@@ -1304,11 +1318,13 @@ Begin
             If Oid = ePadObject Then
             Begin
                 Pad := Obj;
-                If Pad.TopShape = eRectangular Then Result := 'rectangular'
+                Result := 'unknown';
+                If Pad.TopShape = eRounded Then Result := 'round'
+                Else If Pad.TopShape = eRectangular Then Result := 'rectangular'
                 Else If Pad.TopShape = eOctagonal Then Result := 'octagonal'
                 Else If Pad.TopShape = eRoundedRectangular Then Result := 'roundrectangle'
-                Else If Pad.TopShape = eCustomShape Then Result := 'custom'
-                Else Result := 'round';
+                Else If PadCustomShapeSupported(0) Then
+                    If Pad.TopShape = eCustomShape Then Result := 'custom';
             End;
         End
         Else If PropName = 'BotXSize' Then
@@ -2529,6 +2545,33 @@ Begin
     Result := Result + '}';
 End;
 
+{ Parse exactly the assignment keys consumed by ApplySetPropertiesPCB.
+  A property's VALUE may contain an advanced member name; it is not a request. }
+Function PCBSetNeedsAdvancedMask(SetStr : String) : Boolean;
+Var
+    Remaining, Assignment, PropName : String;
+    PipePos, EqPos : Integer;
+Begin
+    Result := False;
+    Remaining := SetStr;
+    While Remaining <> '' Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos > 0 Then
+        Begin Assignment := Copy(Remaining, 1, PipePos - 1); Remaining := Copy(Remaining, PipePos + 1, Length(Remaining)); End
+        Else Begin Assignment := Remaining; Remaining := ''; End;
+        EqPos := Pos('=', Assignment);
+        If EqPos = 0 Then Continue;
+        PropName := Copy(Assignment, 1, EqPos - 1);
+        If (PropName = 'SolderMaskBottomExpansion')
+            Or (PropName = 'SolderMaskSeparate') Or (PropName = 'SolderMaskFromHoleEdge') Then
+        Begin
+            Result := True;
+            Exit;
+        End;
+    End;
+End;
+
 Procedure ApplySetPropertiesPCB(Obj : IPCB_Primitive; SetStr : String);
 Var
     Remaining, Assignment, PropName, PropValue : String;
@@ -2553,7 +2596,8 @@ Begin
         If (PropName = 'SolderMaskExpansion') And IsFloatStr(PropValue)
             And (Pos('SolderMaskBottomExpansion=', SetStr) = 0) Then
         Begin
-            Try PCBSetMask(Obj, 'SolderMaskBottomExpansion', PropValue); Except End;
+            If PadAdvancedMaskSupported(0) Then
+                Try PCBSetMask(Obj, 'SolderMaskBottomExpansion', PropValue); Except End;
         End;
     End;
 End;
@@ -3312,6 +3356,13 @@ Begin
     End;
     If SetStr <> '' Then
     Begin
+        If Not PadAdvancedMaskSupported(0) Then
+            If PCBSetNeedsAdvancedMask(SetStr) Then
+            Begin
+                Result := BuildErrorResponse(RequestId, 'UNSUPPORTED_VERSION',
+                    'Separate mask expansions and hole-edge masks need Altium Designer 25 or later; nothing was changed');
+                Exit;
+            End;
         BadLayer := UnresolvedLayerAssignment(Board, SetStr);
         If BadLayer <> '' Then
         Begin

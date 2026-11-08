@@ -4740,20 +4740,19 @@ Var
     Version : String;
     Major, Dot : Integer;
 Begin
-    { Reproduced on AD21 even after destroying the iterator first. The
-      bulk label path can block the UI thread; Try/Except cannot time it
-      out. Refuse before reading components or opening an edit. }
+    { The filtered-loop fix is natively verified on this exact AD21 build.
+      Retain containment on other older hosts before board access or edits. }
     Version := '';
     Try Version := Client.GetProductVersion; Except End;
     Dot := Pos('.', Version);
     If Dot > 0 Then Major := StrToIntDef(Copy(Version, 1, Dot - 1), 0)
     Else Major := StrToIntDef(Version, 0);
-    If Major < 22 Then
+    If (Major < 22) And (Version <> '21.4.1.30') Then
     Begin
         Result := BuildErrorResponse(RequestId, 'UNSUPPORTED',
-            'Bulk component label visibility is disabled on Altium Designer 21 '
-            + 'and earlier because it can hang the PCB editor. No changes were made. '
-            + 'Use the editor to change labels on this version.');
+            'Bulk component label visibility is disabled on this older Altium build. '
+            + 'Only AD21 build 21.4.1.30 has passed native label verification. '
+            + 'No changes were made. Use the editor on other AD21/earlier builds.');
         Exit;
     End;
     Board := Nil;
@@ -4786,8 +4785,7 @@ Begin
     UpdatedNames := 0;
     UpdatedComments := 0;
 
-    { AD21 can hang when NameOn/CommentOn changes the collection being
-      walked. Snapshot matches and destroy the iterator before any write. }
+    { Snapshot matches and destroy the iterator before any write. }
     Comps := TInterfaceList.Create;
     Try
         Iter := Board.BoardIterator_Create;
@@ -4802,16 +4800,11 @@ Begin
                     Comp := Obj;
                     CompName := '';
                     Try CompName := Comp.Name.Text; Except End;
-                    If HasFilter Then
-                    Begin
-                        NameMark := '|' + CompName + '|';
-                        If Pos(NameMark, '|' + FilterStr + '|') = 0 Then
-                        Begin
-                            Obj := Iter.NextPCBObject;
-                            Continue;
-                        End;
-                    End;
-                    Comps.Add(Comp);
+                    { One fall-through advance avoids the reproduced AD21
+                      filtered-loop hang; the interpreter cause is unproven. }
+                    NameMark := '|' + CompName + '|';
+                    If (Not HasFilter) Or (Pos(NameMark, '|' + FilterStr + '|') > 0) Then
+                        Comps.Add(Comp);
                 Except NoteWriteFailed('NameOn/CommentOn'); End;
                 Obj := Iter.NextPCBObject;
             End;
@@ -11784,6 +11777,7 @@ Var
     PadCache : TPadCache;
     SolderMask, SolderMaskBottom, PasteMask : Double;
     MaskSeparateFlag : Boolean;
+    MaskBottomJson, MaskSeparateJson : String;
     First : Boolean;
     Count : Integer;
 Begin
@@ -11841,12 +11835,13 @@ Begin
 
         // Get pad shape as string
         Try
+            ShapeStr := 'Other';
             If Pad.TopShape = eRounded Then ShapeStr := 'Round'
             Else If Pad.TopShape = eRectangular Then ShapeStr := 'Rectangular'
             Else If Pad.TopShape = eOctagonal Then ShapeStr := 'Octagonal'
             Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'RoundedRect'
-            Else If Pad.TopShape = eCustomShape Then ShapeStr := 'Custom'
-            Else ShapeStr := 'Other';
+            Else If PadCustomShapeSupported(0) Then
+                If Pad.TopShape = eCustomShape Then ShapeStr := 'Custom';
         Except ShapeStr := 'Unknown'; End;
 
         // Get cache (solder/paste mask expansion). The solder mask value
@@ -11855,14 +11850,25 @@ Begin
         SolderMask := 0;
         SolderMaskBottom := 0;
         MaskSeparateFlag := False;
+        MaskBottomJson := 'null';
+        MaskSeparateJson := 'null';
         PasteMask := 0;
         Try
             PadCache := Pad.GetState_Cache;
-            MaskSeparateFlag := PadCache.UseSeparateExpansions;
+            If PadAdvancedMaskSupported(0) Then
+            Begin
+                MaskSeparateFlag := PadCache.UseSeparateExpansions;
+                MaskSeparateJson := BoolToJsonStr(MaskSeparateFlag);
+                MaskBottomJson := '0';
+            End;
             If PadCache.SolderMaskExpansionValid = eCacheManual Then
             Begin
                 SolderMask := CoordToMilsF(PadCache.SolderMaskExpansion);
-                SolderMaskBottom := CoordToMilsF(PadCache.SolderMaskBottomExpansion);
+                If PadAdvancedMaskSupported(0) Then
+                Begin
+                    SolderMaskBottom := CoordToMilsF(PadCache.SolderMaskBottomExpansion);
+                    MaskBottomJson := FloatToJsonStr(SolderMaskBottom);
+                End;
             End;
             If PadCache.PasteMaskExpansionValid = eCacheManual Then
                 PasteMask := CoordToMilsF(PadCache.PasteMaskExpansion);
@@ -11881,8 +11887,8 @@ Begin
             + '"rotation":' + FloatToJsonStr(Pad.Rotation) + ','
             + '"is_smd":' + BoolToJsonStr(Pad.IsSurfaceMount) + ','
             + '"solder_mask_expansion":' + FloatToJsonStr(SolderMask) + ','
-            + '"solder_mask_bottom_expansion":' + FloatToJsonStr(SolderMaskBottom) + ','
-            + '"solder_mask_separate":' + BoolToJsonStr(MaskSeparateFlag) + ','
+            + '"solder_mask_bottom_expansion":' + MaskBottomJson + ','
+            + '"solder_mask_separate":' + MaskSeparateJson + ','
             + '"paste_mask_expansion":' + FloatToJsonStr(PasteMask) + '}';
         Inc(Count);
 
@@ -17965,6 +17971,8 @@ End;
 
 Function PCB_SetViaSoldermaskRelief(Params : String; RequestId : String) : String;
 Var
+    MaskPad : IPCB_Pad;
+    MaskPrim : IPCB_Primitive;
     Board : IPCB_Board;
     Iterator : IPCB_BoardIterator;
     Via : IPCB_Via;
@@ -17978,6 +17986,12 @@ Var
     Matched, Verified : Integer;
     Ok : Boolean;
 Begin
+    If Not PadAdvancedMaskSupported(0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNSUPPORTED_VERSION',
+            'Hole-edge via relief needs Altium Designer 25 or later; nothing was changed');
+        Exit;
+    End;
     { ONE WRITE ON A VIA CRASHES THE SCRIPTING ENGINE, AND IT IS NOT THIS ONE.
       Assigning SolderMaskExpansion straight onto an IPCB_Via raises an
       access violation in ScriptingSystem.DLL (read of address 0x38) on
@@ -18041,20 +18055,22 @@ Begin
             Prim := Matches.Items[I];
             If Prim = Nil Then Continue;
             Via := Prim;
+            MaskPad := Via;
+            MaskPrim := MaskPad;
             PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
                 PCBM_BeginModify, c_NoEventData);
-            Via.SolderMaskExpansionFromHoleEdge := True;
-            Cache := Via.GetState_Cache;
+            MaskPrim.SolderMaskExpansionFromHoleEdge := True;
+            Cache := MaskPrim.GetState_Cache;
             Cache.SolderMaskExpansion := Exp;
             Cache.SolderMaskBottomExpansion := Exp;
             Cache.SolderMaskExpansionValid := eCacheManual;
-            Via.SetState_Cache := Cache;
+            MaskPrim.SetState_Cache := Cache;
             PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
                 PCBM_EndModify, c_NoEventData);
             ReindexBoardObject(Board, Via);
             Via.GraphicallyInvalidate;
-            Cache := Via.GetState_Cache;
-            Ok := Via.SolderMaskExpansionFromHoleEdge
+            Cache := MaskPrim.GetState_Cache;
+            Ok := MaskPrim.SolderMaskExpansionFromHoleEdge
                 And (Cache.SolderMaskExpansionValid = eCacheManual)
                 And (Abs(Cache.SolderMaskExpansion - Exp) <= 10)
                 And (Abs(Cache.SolderMaskBottomExpansion - Exp) <= 10);
@@ -25569,11 +25585,13 @@ Function LmShapeName(S : Integer) : String;
 Var
     Name : String;
 Begin
-    Name := 'round';
+    Name := 'unknown';
+    If S = eRounded Then Name := 'round';
     If S = eRectangular Then Name := 'rect';
     If S = eOctagonal Then Name := 'octagon';
     If S = eRoundedRectangular Then Name := 'roundrect';
-    If S = eCustomShape Then Name := 'custom';
+    If PadCustomShapeSupported(0) Then
+        If S = eCustomShape Then Name := 'custom';
     Result := Name;
 End;
 
@@ -25930,7 +25948,7 @@ Function LmMaskJson(Obj : IPCB_Primitive) : String;
 Var
     Cache : TPadCache;
     TentTop, TentBot, FromHole : Boolean;
-    Manual : String;
+    Manual, FromHoleJson : String;
     Bottom : Integer;
 Begin
     TentTop := False;
@@ -25938,19 +25956,28 @@ Begin
     FromHole := False;
     Try TentTop := Obj.GetState_IsTenting_Top; Except TentTop := False; End;
     Try TentBot := Obj.GetState_IsTenting_Bottom; Except TentBot := False; End;
-    Try FromHole := Obj.SolderMaskExpansionFromHoleEdge; Except FromHole := False; End;
+    FromHoleJson := 'null';
+    If PadAdvancedMaskSupported(0) Then
+        Try
+            FromHole := Obj.SolderMaskExpansionFromHoleEdge;
+            FromHoleJson := BoolToJsonStr(FromHole);
+        Except End;
     Manual := 'null';
     Try
         Cache := Obj.GetState_Cache;
         If Cache.SolderMaskExpansionValid = eCacheManual Then
         Begin
-            Bottom := Cache.SolderMaskExpansion;
-            If Cache.UseSeparateExpansions Then Bottom := Cache.SolderMaskBottomExpansion;
-            Manual := '[' + IntToStr(Cache.SolderMaskExpansion) + ',' + IntToStr(Bottom) + ']';
+            Manual := '[' + IntToStr(Cache.SolderMaskExpansion) + ',null]';
+            If PadAdvancedMaskSupported(0) Then
+            Begin
+                Bottom := Cache.SolderMaskExpansion;
+                If Cache.UseSeparateExpansions Then Bottom := Cache.SolderMaskBottomExpansion;
+                Manual := '[' + IntToStr(Cache.SolderMaskExpansion) + ',' + IntToStr(Bottom) + ']';
+            End;
         End;
     Except Manual := 'null'; End;
     Result := ',"tent":[' + BoolToJsonStr(TentTop) + ',' + BoolToJsonStr(TentBot)
-        + '],"from_hole":' + BoolToJsonStr(FromHole) + ',"mask":' + Manual;
+        + '],"from_hole":' + FromHoleJson + ',"mask":' + Manual;
 End;
 
 Function LmPadsSection(Board : IPCB_Board; Offset : Integer; Limit : Integer) : String;

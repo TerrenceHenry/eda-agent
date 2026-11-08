@@ -16004,13 +16004,14 @@ Begin
             Else If Obj.ObjectId = ePadObject Then
             Begin
                 Pad := Obj;
-                ShapeStr := 'Round';
+                ShapeStr := 'Unknown';
                 Try
                     If Pad.TopShape = eRounded Then ShapeStr := 'Round'
                     Else If Pad.TopShape = eRectangular Then ShapeStr := 'Rectangular'
                     Else If Pad.TopShape = eOctagonal Then ShapeStr := 'Octagonal'
                     Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'RoundedRect'
-                    Else If Pad.TopShape = eCustomShape Then ShapeStr := 'Custom';
+                    Else If PadCustomShapeSupported(0) Then
+                        If Pad.TopShape = eCustomShape Then ShapeStr := 'Custom';
                 Except End;
                 { Drill shape: round / square / slot. Slot pads expose a   }
                 { separate hole_width and a hole_rotation; round + square }

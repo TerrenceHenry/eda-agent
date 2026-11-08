@@ -7190,9 +7190,10 @@ def register_pcb_tools(mcp):
 
         At least one of ``designators`` / ``comments`` must be supplied.
 
-        Altium 21 and earlier return UNSUPPORTED before any board access:
-        this bulk operation can hang that editor even with a snapshot
-        of the component iterator. Change labels in the editor there.
+        On Altium 21 and earlier, only the exact native-tested build
+        21.4.1.30 is enabled. Other older/unknown builds return UNSUPPORTED
+        before board access. AD22+ behavior is unchanged; AD25/26 were not
+        natively tested for this local fix.
 
         Returns:
             Dict with:
@@ -9233,6 +9234,9 @@ def register_pcb_tools(mcp):
         """Open the solder mask round each via's barrel, measured from the
         hole edge, on both sides.
 
+        Requires Altium Designer 25 or later. Older versions return
+        UNSUPPORTED_VERSION before any vias are changed.
+
         The opening is the hole plus ``expansion_mils``, written as a
         manual value on both sides (a linked via still stores the bottom
         one) and read back into ``vias_verified``. A rule scoped
@@ -9626,8 +9630,10 @@ def register_pcb_tools(mcp):
             solder_mask_expansion is the TOP side when
             solder_mask_separate is true and both sides when it is false;
             the bottom value is stored either way and takes effect once
-            the sides are unlinked. Expansions read 0 when the pad follows
-            the board's rule.
+            the sides are unlinked. Before AD25, solder_mask_bottom_expansion
+            and solder_mask_separate are null (unknown, not zero, False or
+            equal to top); solder_mask_expansion remains the legacy value.
+            Available expansions read 0 when the pad follows the board's rule.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {}

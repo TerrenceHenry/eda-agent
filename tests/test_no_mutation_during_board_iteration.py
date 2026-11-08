@@ -214,4 +214,6 @@ def test_the_via_relief_never_assigns_the_expansion_on_the_via(source: str):
     body = _body(source, "PCB_SetViaSoldermaskRelief")
     assert not re.search(r"\bVia\.SolderMaskExpansion\s*:=", body)
     assert "Cache.SolderMaskExpansion := Exp;" in body
-    assert "Via.SetState_Cache := Cache;" in body
+    assert "MaskPad := Via;" in body
+    assert "MaskPrim := MaskPad;" in body
+    assert "MaskPrim.SetState_Cache := Cache;" in body
