@@ -77,7 +77,14 @@ def test_the_modify_reply_carries_the_index_outcome():
 def test_the_via_mask_tools_reindex_after_the_write():
     for name in ("PCB_SetViaSoldermaskRelief", "PCB_SetViaTenting"):
         body = _routine("PCB.pas", "Function", name)
-        write = body.index("Via.SetState_Cache := Cache;")
+        if name == "PCB_SetViaSoldermaskRelief":
+            # AD25 exposes the cache via the pad-to-primitive interface.
+            pad = body.index("MaskPad := Via;")
+            primitive = body.index("MaskPrim := MaskPad;")
+            write = body.index("MaskPrim.SetState_Cache := Cache;")
+            assert pad < primitive < write
+        else:
+            write = body.index("Via.SetState_Cache := Cache;")
         end_modify = body.index("PCBM_EndModify", write)
         call = body.index("ReindexBoardObject(Board, Via);")
         assert write < end_modify < call, name

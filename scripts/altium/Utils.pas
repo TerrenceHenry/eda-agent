@@ -4,6 +4,35 @@
 { Utils.pas - Utility functions for the Altium integration bridge                             }
 {..............................................................................}
 
+{ Capability gates must precede every reference to newer SDK identifiers.
+  DelphiScript cannot catch an undeclared identifier, even in Try/Except.
+  Keep the checks separate: custom pad shapes work on AD 25.8.1.18 (#118),
+  and separate/hole-edge mask members work on AD 25.8 (#59, #60, #61).
+  These remain separate capabilities even though their measured floors match. }
+Function PadCustomShapeSupported(Dummy : Integer) : Boolean;
+Var
+    Ver : String;
+    Major : Integer;
+Begin
+    Ver := '';
+    Try Ver := Client.GetProductVersion; Except Ver := ''; End;
+    Major := 0;
+    If Pos('.', Ver) > 1 Then Major := StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0);
+    Result := Major >= 25;
+End;
+
+Function PadAdvancedMaskSupported(Dummy : Integer) : Boolean;
+Var
+    Ver : String;
+    Major : Integer;
+Begin
+    Ver := '';
+    Try Ver := Client.GetProductVersion; Except Ver := ''; End;
+    Major := 0;
+    If Pos('.', Ver) > 1 Then Major := StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0);
+    Result := Major >= 25;
+End;
+
 Function MilsToCoord(Mils : Integer) : TCoord;
 Begin
     Result := Mils * 10000; // 1 mil = 10000 internal units

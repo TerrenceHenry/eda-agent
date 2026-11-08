@@ -2832,7 +2832,10 @@ def register_library_tools(mcp):
         written, and each is read back: one that did not take sets
         ``all_writes_ran`` false. A middle or bottom diameter raises the via
         to a local-stack via in the same call. The mask expansions are set
-        through the pad cache.
+        through the pad cache. Before Altium Designer 25, requests for
+        ``mask_bottom_expansion``, ``mask_separate`` or
+        ``mask_from_hole_edge`` return UNSUPPORTED_VERSION before any
+        fields in this call are changed; the legacy mask value remains usable.
 
         Tenting holds only on a manual mask expansion, so a rule-driven
         via is switched to a manual expansion at its current value first
@@ -2852,8 +2855,9 @@ def register_library_tools(mcp):
             stack_mode: "simple" (one diameter on every layer) or
                 "top-middle-bottom", written before the sizes.
             tenting_top, tenting_bottom: Solder mask tenting on each side.
-            mask_expansion: Solder mask expansion (manual), both sides
-                unless ``mask_bottom_expansion`` is also given.
+            mask_expansion: Manual solder mask expansion. On AD25+, both
+                sides unless ``mask_bottom_expansion`` is also given;
+                earlier versions write only the legacy mask field.
             mask_bottom_expansion: Bottom solder mask expansion (manual).
             mask_separate: Separate (True) or linked (False) mask expansions.
             mask_manual: True keeps the mask as written; False hands it
@@ -2867,7 +2871,9 @@ def register_library_tools(mcp):
             ``mid_unverified`` (a middle diameter that reads back 0 on
             this build, so the write could not be checked) and
             ``mask_made_manual``. A field this build cannot read comes back
-            null.
+            null. Before AD25, ``mask_bottom_expansion_mm``,
+            ``mask_separate`` and ``mask_from_hole_edge`` are null,
+            meaning unknown, not zero, False or equal to the top value.
         """
         if stack_mode is not None and stack_mode not in ("simple",
                                                          "top-middle-bottom"):
@@ -7139,14 +7145,18 @@ def register_library_tools(mcp):
              layer, selected, mode, paste_expansion_mm,
              paste_expansion_source, paste_expansion_state,
              mask_expansion_mm, mask_bottom_expansion_mm, mask_separate,
-             mask_expansion_source, mask_expansion_state}]}.
+             mask_expansion_source, mask_expansion_state,
+             mask_from_hole_edge}]}.
             selected is whether the pad is selected in the editor (what
             lib_set_pad_properties selected=True acts on); mode is the
             stack mode, 0 simple, 1 top-middle-bottom, 2 full stack.
             x/y is the pad origin, copper_x/y the copper centre (differs
             on a custom pad). hole_rotation is relative to the pad.
-            mask_expansion_mm is the top side when mask_separate, else
-            both; mask_bottom_expansion_mm is the stored bottom value.
+            mask_expansion_mm is the top side when mask_separate is true,
+            both when false; mask_bottom_expansion_mm is the stored bottom
+            value. Before AD25, mask_bottom_expansion_mm, mask_separate
+            and mask_from_hole_edge are null (unknown, not zero, False or
+            equal to top); mask_expansion_mm remains the legacy value.
             *_source is 'manual' (pad override) or 'rule' (value 0; the
             rule holds it); *_state is the cache's manual/valid/invalid.
         """
@@ -7188,22 +7198,18 @@ def register_library_tools(mcp):
         y: Optional[float] = None,
         new_name: str = "",
     ) -> dict[str, Any]:
-        """Change existing pads in a PcbLib footprint: every pad named
-        ``pad_name``, or with ``selected=True`` every pad selected in the
-        editor, only the fields given, each read back. A written
-        expansion is made manual, without which Altium ignores it;
-        ``mask_manual`` / ``paste_manual`` False hands one back to the
-        design rule. On a per-layer pad stack ``x_size`` / ``y_size`` are
-        the top size (``note``); ``stack_mode`` and the bottom size
-        change the rest.
+        """Change named or selected PcbLib pads; write only supplied fields
+        and read them back. Expansions become manual; mask_manual or
+        paste_manual=False restores the rule. Stacked pads' x_size/y_size
+        affect only the top (note); stack_mode/bottom sizes affect the rest.
+        Before AD25, mask_bottom_expansion, mask_separate or mask_from_hole_edge
+        requests return UNSUPPORTED_VERSION before any mutation. Legacy
+        mask/paste values remain usable.
 
         Args:
             footprint_name: The footprint holding the pad.
-            pad_name: The pad's designator. Names need not be unique (an
-                SMD pad "1" beside a thru-hole "1"): use ``selected``
-                to say which.
-            selected: Change the pads selected in the editor instead of
-                those named ``pad_name``.
+            pad_name: Designator; names may repeat. Use selected to disambiguate.
+            selected: Change selected pads instead of matching pad_name.
             library_path: Optional .PcbLib path; defaults to the focused
                 library.
             units: "mil" (default) or "mm", for every length here.
@@ -7211,14 +7217,12 @@ def register_library_tools(mcp):
             bottom_x_size, bottom_y_size: Bottom copper size; makes a
                 simple pad top-middle-bottom.
             shape: "round", "rectangular", "octagonal" or "roundrect".
-            corner_radius_pct: Rounded-rectangle corner, 0 to 100, as a
-                percentage of half the shorter side (how Altium stores
-                it); 25 when ``shape`` is roundrect and this is not given.
+            corner_radius_pct: Rounded-rectangle radius, 0-100% of half
+                the shorter side; defaults to 25 for shape=roundrect.
             stack_mode: "simple" (the top size serves every layer) or
                 "top-middle-bottom", written before the sizes.
             rotation: Pad rotation in degrees.
-            hole_type: "round", "square" or "slot", written before the
-                hole sizes, so a slot can be made round again.
+            hole_type: "round", "square" or "slot", written before hole sizes.
             hole_size: Hole diameter, 0 for a surface-mount pad.
             hole_width: Slot length; makes the hole a slot (so it is
                 refused beside ``hole_type`` round or square).
@@ -7227,8 +7231,9 @@ def register_library_tools(mcp):
             paste_expansion: Paste expansion.
             paste_manual: True keeps the paste value as written; False
                 hands the paste back to the design rule.
-            mask_expansion: Mask expansion, both sides unless
-                ``mask_bottom_expansion`` is also given.
+            mask_expansion: Mask expansion. On AD25+, both sides unless
+                ``mask_bottom_expansion`` is also given; earlier versions
+                write only the legacy mask field.
             mask_bottom_expansion: Bottom mask expansion; unlinks sides.
             mask_separate: Link (False) or unlink (True) the mask sides
                 (the bottom value takes effect once unlinked).
@@ -7249,7 +7254,9 @@ def register_library_tools(mcp):
             ``corner_radius_pct``, ``stack_mode``, rotation, hole, slot,
             plating, expansions and their state, ``mask_separate``,
             ``mask_from_hole_edge``, ``paste_top_enabled``,
-            ``all_writes_ran``).
+            ``all_writes_ran``). Before AD25, ``mask_bottom_expansion_mm``,
+            ``mask_separate`` and ``mask_from_hole_edge`` are null,
+            meaning unknown, not zero, False or equal to the top value.
         """
         refusal = _units_refusal(units)
         if refusal:
@@ -7354,7 +7361,10 @@ def register_library_tools(mcp):
         mask (top, bottom, separate, ``mask_expansion_source`` manual or
         rule, ``mask_from_hole_edge``), tenting, the four testpoint flags
         (read only), ``stack_mode`` and its top / mid / bottom diameters;
-        each body its outline box (x1, y1, x2, y2).
+        each body its outline box (x1, y1, x2, y2). Before AD25, a via's
+        ``mask_bottom_expansion_mm``, ``mask_separate`` and
+        ``mask_from_hole_edge`` are null (unknown, not zero, False or
+        equal to top); its legacy mask expansion remains available.
 
         Returns:
             {name, library_path, height_mm, editor_origin_x_mm /

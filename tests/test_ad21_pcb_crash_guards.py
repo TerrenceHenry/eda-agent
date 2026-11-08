@@ -71,9 +71,9 @@ def test_visibility_writes_only_after_destroying_iterator_and_verifies_result():
     assert "JsonInt('failed', Failed)" in body and "Comps.Free" not in body
 
 
-def test_ad21_visibility_is_refused_before_touching_board_or_starting_edit():
+def test_unverified_older_visibility_is_refused_before_board_access():
     body = _pcb()["PCB_SetTextVisibility"]
-    guard = body.index("If Major < 22 Then")
+    guard = body.index("If (Major < 22) And (Version <> '21.4.1.30') Then")
     refusal = body.index("'UNSUPPORTED'", guard)
     assert body.index("Client.GetProductVersion") < guard
     assert refusal < body.index("GetPCBBoardAnywhere")

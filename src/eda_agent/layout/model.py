@@ -69,11 +69,12 @@ class Pad:
     plated: bool = True
     #: Solder mask, as on the object: tented per side, the expansion taken
     #: from the hole edge, and a hand-set (top, bottom) expansion in mils.
-    #: None leaves the expansion to the board's mask rule.
+    #: A None mask_manual leaves expansion to the rule. A None side or
+    #: mask_from_hole means unavailable, never a measured zero or False.
     tent_top: bool = False
     tent_bottom: bool = False
-    mask_from_hole: bool = False
-    mask_manual: list[float] | None = None
+    mask_from_hole: bool | None = False
+    mask_manual: list[float | None] | None = None
 
     @property
     def key(self) -> str:
@@ -173,8 +174,8 @@ class Via:
     #: Solder mask, as on Pad.
     tent_top: bool = False
     tent_bottom: bool = False
-    mask_from_hole: bool = False
-    mask_manual: list[float] | None = None
+    mask_from_hole: bool | None = False
+    mask_manual: list[float | None] | None = None
 
     def shape_on(self, layer: str) -> geom.Shape:
         return geom.circle(self.x, self.y,

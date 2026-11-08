@@ -516,6 +516,9 @@ def mask_openings(board: LayoutBoard, rules: RuleSet) -> list[tuple[Item, float]
         side = sides[layer]
         if (obj.tent_top, obj.tent_bottom)[side]:
             return
+        if obj.mask_from_hole is None or (
+                obj.mask_manual is not None and any(value is None for value in obj.mask_manual)):
+            raise ValueError("Cannot calculate solder mask openings with unavailable mask fields")
         if obj.mask_from_hole and getattr(obj, "hole", 0.0) > 0:
             shape = geom.circle(obj.x, obj.y, obj.hole)
         item = Item(kind, idx, obj.net, layer, shape, comp)
@@ -671,9 +674,14 @@ def verdict(board: LayoutBoard, rules: RuleSet | None = None, limit: int = 500,
     notes = []
     if slivers is None and "mask_sliver" in present:
         not_checked.insert(0, "mask_sliver")
-        notes.append("the board was read without its solder mask data (tenting, hand set "
-                     "expansions), so mask slivers were not checked; deploy the current "
-                     "scripts and read it again")
+        reason = board.meta.get("mask_unavailable_reason")
+        if reason:
+            notes.append(f"{reason}; mask slivers were not checked. "
+                         "Use native Altium DRC to check them")
+        else:
+            notes.append("the board was read without its solder mask data (tenting, hand set "
+                         "expansions), so mask slivers were not checked; deploy the current "
+                         "scripts and read it again")
     if unknown:
         notes.append(f"{len(unknown)} rule(s) this check applies use a scope it cannot "
                      "evaluate and were not applied")

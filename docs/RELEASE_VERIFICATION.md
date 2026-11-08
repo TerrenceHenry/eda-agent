@@ -1,4 +1,87 @@
-# Release verification: 2026.11.07.4
+# Release verification: 2026.11.07.5
+
+## Local filtered-label guard assessment (2026-11-08)
+
+This section supersedes the historical blanket AD21 refusal below. A filtered
+Continue inside Try/Except was removed in favor of conditional collection and
+one common iterator advance. The internal interpreter failure is not proven.
+Only exact AD21 build 21.4.1.30 is exempted from the older-host guard; other
+AD21/earlier and unknown versions still refuse before board access. Existing
+AD22+ behavior is unchanged. Native AD25/26 coverage is not claimed.
+
+Disposable 447-component validation covered all four name/comment combinations,
+idempotency, exact/case-sensitive filtering, duplicate tokens, no matches, and
+missing/invalid parameters. Independent comments-only readback confirmed only
+three selected comments changed and every name remained shown. Final enabled
+handler, persistence and existing-chat verification are recorded in local
+assessment artifacts. No production project is a mutation fixture.
+
+## Pad and mask candidate verification (2026-11-07)
+
+This candidate completes the version-aware custom-pad and advanced mask paths.
+Custom shapes and separate/bottom/hole-edge mask fields have separate capability
+helpers, both currently requiring AD25 or later. The evidence is upstream issues
+[#118](https://github.com/salitronic/eda-agent/issues/118) and
+[#59](https://github.com/salitronic/eda-agent/issues/59),
+[#60](https://github.com/salitronic/eda-agent/issues/60),
+[#61](https://github.com/salitronic/eda-agent/issues/61), all reporting AD25.8.1.18.
+These are tested-known floors, not proof that every older release lacks each API.
+
+All custom-shape readers guard identifier resolution, including generic board
+and layout readers. Unrecognized shapes report unknown rather than round.
+Unsupported explicit advanced mask writes refuse before mutation; legacy top
+mask and paste paths remain available. Unknown mask fields stay null, and layout
+mask analysis reports unavailable rather than a false clear verdict. Via hole-edge
+writes use the verified via-to-pad-to-primitive interface route.
+
+At the time of this pad/mask verification, the AD21 bulk-label refusal and
+stack-manager gate remained in place. The label assessment above supersedes
+that blanket refusal. Native AD25/26 acceptance is not claimed.
+
+### Candidate native validation
+
+AD21.4.1.30 on 2026-11-07; only disposable copies or newly created neutral
+fixtures were tested. The installed script project was backed up, installed
+and Altium restarted; all ten reported unit stamps match the deployed files
+and the version matches this candidate.
+
+- Board, generic and library readers return the three fixture pad shapes and
+  null for unavailable bottom/separate/hole-edge mask data. Requests mixing a
+  geometry change with any unsupported mask field reject before changing pad
+  geometry. Legacy top mask writes read back 3 mil. Property-looking text is
+  accepted as text, rather than falsely triggering the capability preflight.
+- An explicitly manual 3 mil top mask reads as [3, null] in the layout model.
+  The live Python reader marks mask analysis unavailable; sliver checks and via
+  mask inference give no verdict and direct opening geometry refuses unknown
+  data. Unknown pad shape tokens also cannot become rectangular copper.
+- A fresh library export was closed and reopened from disk. All three pads and
+  the embedded STEP body metadata match the source; the source library hash
+  stays unchanged.
+- Two STEP bodies imported into a new board and saved under this candidate
+  preserve requested XY offsets and Z=50 mil versus Z=0. Independent saved-file
+  reads of MODEL.3D.DZ and both body extents agree; the model cache stores
+  DZ=500000 versus 0 internal units. This is persisted-state verification, not
+  a rendered 3D inspection.
+- All three stack-manager entry points refuse AD21 without calling the SDK.
+  The legacy dielectric setter changes the disposable physical stack and
+  reports manager synchronization unsupported/skipped. The bridge remains
+  responsive after each refusal.
+- AD21 bulk label refusal is retained. Isolated NameOn/CommentOn reads and
+  writes, modification notifications and invalidation passed. On a copied
+  447-component assembly, both snapshot-first and original iterator-mutation
+  standalone diagnostics completed for two target labels. The prior bridge
+  hang was not reproduced, so these results do not establish its root cause or
+  justify enabling the bulk command.
+
+Native AD25/26, supported-host stack-manager synchronization, and rendered 3D
+inspection remain unverified. Windows Security was not changed. The firewall
+prompt could not be targeted by the available computer controls. Local evidence
+includes private design information and must not be published; use neutral
+fixtures and a redacted summary for any upstream report.
+
+Offline check results are recorded with the final validation artifacts.
+
+## Prior revision verification
 
 This revision addresses the AD21 incident paths: reject unsupported stack-manager
 SDK calls before entering them, export a footprint through a fresh library,
@@ -488,7 +571,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.11.07.4`, `version_match` =
+Expect `altium_script_version` = `2026.11.07.5`, `version_match` =
 `true`, and `mcp_server_version` = `0.8.1.post1`.
 
 Those are two different versions and they fail differently.

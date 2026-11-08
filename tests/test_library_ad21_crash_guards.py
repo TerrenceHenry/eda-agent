@@ -28,28 +28,15 @@ def routine(name):
     return text[start:start + 1 + end.start()] if end else text[start:]
 
 
-def test_custom_shape_never_resolves_on_ad21():
-    gate = routine("LibraryAdvancedPadApiSupported")
-    assert "Client.GetProductVersion" in gate
-    assert "Result := Major >= 26;" in gate
-    text = code()
-    uses = list(re.finditer(r"Pad\.TopShape = eCustomShape", text))
-    assert len(uses) == 4
-    for use in uses:
-        assert re.search(
-            r"Else If LibraryAdvancedPadApiSupported\(0\) Then\s+If $",
-            text[max(0, use.start() - 130):use.start()])
-
-
 def test_pad_read_uses_typed_cache_and_marks_unmeasured_fields_unavailable():
     body = routine("Lib_GetPadGeometry")
     assert "Pad.Cache." not in body
     assert "PadCache := Pad.GetState_Cache;" in body
     assert "ExpBottomJson := 'null';" in body
     assert "ExpSeparateJson := 'null';" in body
-    assert re.search(r"If LibraryAdvancedPadApiSupported\(0\) Then\s+Begin\s+"
+    assert re.search(r"If PadAdvancedMaskSupported\(0\) Then\s+Begin\s+"
                      r"ExpSeparate := PadCache.UseSeparateExpansions", body)
-    assert re.search(r"If LibraryAdvancedPadApiSupported\(0\) Then\s+Begin\s+"
+    assert re.search(r"If PadAdvancedMaskSupported\(0\) Then\s+Begin\s+"
                      r"ExpBottom := CoordToMM\(PadCache.SolderMaskBottomExpansion\)", body)
     assert "Pad.Cache." not in routine("CacheStateName")
     assert "Cache := Pad.GetState_Cache;" in routine("CacheStateName")

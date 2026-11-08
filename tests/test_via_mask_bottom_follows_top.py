@@ -41,7 +41,7 @@ def _mask_block(body: str) -> str:
 
 def test_the_library_via_bottom_takes_the_top_when_no_bottom_is_given():
     block = _mask_block(_lib_via())
-    assert ("If MaskBotStr = '' Then "
+    assert ("If MaskBotStr = '' Then If PadAdvancedMaskSupported(0) Then "
             "PadCache.SolderMaskBottomExpansion := PadCache.SolderMaskExpansion;") in block
     # The copy follows the top write, so it copies the new value.
     assert block.index("PadCache.SolderMaskExpansion := CoordFromUnits(") < \
@@ -51,7 +51,7 @@ def test_the_library_via_bottom_takes_the_top_when_no_bottom_is_given():
 def test_an_explicit_library_bottom_still_wins_and_lands_before_the_write():
     body = _lib_via()
     copy = body.index("PadCache.SolderMaskBottomExpansion := PadCache.SolderMaskExpansion;")
-    explicit = body.index("If MaskBotStr <> '' Then PadCache.SolderMaskBottomExpansion := "
+    explicit = body.index("If MaskBotStr <> '' Then If PadAdvancedMaskSupported(0) Then PadCache.SolderMaskBottomExpansion := "
                           "CoordFromUnits(StrToFloatDef(MaskBotStr, 0), UnitsStr);")
     write = body.index("FoundPad.SetState_Cache := PadCache;", copy)
     assert copy < explicit < write
@@ -62,7 +62,7 @@ def test_the_followed_library_bottom_is_read_back():
     write = body.index("FoundPad.SetState_Cache := PadCache;",
                        body.index("PadCache.SolderMaskBottomExpansion := PadCache.SolderMaskExpansion;"))
     check = body.index(
-        "If (MaskStr <> '') And (MaskBotStr = '') Then "
+        "If (MaskStr <> '') And (MaskBotStr = '') Then If PadAdvancedMaskSupported(0) Then "
         "If Abs(PadCache.SolderMaskBottomExpansion "
         "- CoordFromUnits(StrToFloatDef(MaskStr, 0), UnitsStr)) > Tol Then Ok := False;")
     assert check > write
@@ -74,7 +74,7 @@ def test_the_board_bottom_follows_a_lone_generic_expansion():
     follow = body.index(
         "If (PropName = 'SolderMaskExpansion') And IsFloatStr(PropValue) "
         "And (Pos('SolderMaskBottomExpansion=', SetStr) = 0) Then Begin "
-        "Try PCBSetMask(Obj, 'SolderMaskBottomExpansion', PropValue); Except End; End;")
+        "If PadAdvancedMaskSupported(0) Then Try PCBSetMask(Obj, 'SolderMaskBottomExpansion', PropValue); Except End; End;")
     # Inside the per-assignment loop, after the top value was written.
     assert applied < follow < body.rindex("End;")
     assert body.count("PCBSetMask(Obj, 'SolderMaskBottomExpansion', PropValue)") == 1
