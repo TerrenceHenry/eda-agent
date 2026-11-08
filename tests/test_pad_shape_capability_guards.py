@@ -41,6 +41,13 @@ def check_capabilities(text):
         assert "StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0)" in body
         assert f"Result := Major >= {minimum};" in body
         assert "eCustomShape" not in body
+        exception = "If Ver = '21.4.1.30' Then Result := True;"
+        if name == "PadAdvancedMaskSupported":
+            assert exception in body
+            assert body.count("Result :=") == 2
+        else:
+            assert exception not in body
+            assert body.count("Result :=") == 1
 
 
 def test_independent_capabilities_live_in_early_shared_unit():
@@ -91,3 +98,19 @@ def test_unknown_shape_is_not_reported_as_round():
             assert re.search(r"(?:ShapeStr|Str|Result|Name) := '(?:unknown|Unknown|Other)';", before)
             after = text[use.end():use.end() + 120]
             assert not re.search(r"Else (?:ShapeStr|Str|Result|Name) := '[Rr]ound';", after)
+
+
+@pytest.mark.parametrize("replacement", ["21.4.1.29", "21.4.1.31", "21.4", "21", ""])
+def test_changing_exact_mask_exception_is_detected(replacement):
+    text = source("Utils.pas")
+    broken = text.replace("Ver = '21.4.1.30'", "Ver = '" + replacement + "'")
+    assert broken != text
+    with pytest.raises(AssertionError):
+        check_capabilities(broken)
+
+
+def test_removing_exact_mask_exception_is_detected():
+    text = source("Utils.pas")
+    broken = text.replace("If Ver = '21.4.1.30' Then Result := True;", "")
+    with pytest.raises(AssertionError):
+        check_capabilities(broken)
