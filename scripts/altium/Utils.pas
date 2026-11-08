@@ -8,7 +8,9 @@
   DelphiScript cannot catch an undeclared identifier, even in Try/Except.
   Keep the checks separate: custom pad shapes work on AD 25.8.1.18 (#118),
   and separate/hole-edge mask members work on AD 25.8 (#59, #60, #61).
-  These remain separate capabilities even though their measured floors match. }
+  Native write/read/save/reopen tests also verified the mask members on
+  AD 21.4.1.30. This exact-build exception does not enable custom shapes
+  or infer support for other AD21 builds. }
 Function PadCustomShapeSupported(Dummy : Integer) : Boolean;
 Var
     Ver : String;
@@ -31,6 +33,7 @@ Begin
     Major := 0;
     If Pos('.', Ver) > 1 Then Major := StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0);
     Result := Major >= 25;
+    If Ver = '21.4.1.30' Then Result := True;
 End;
 
 Function MilsToCoord(Mils : Integer) : TCoord;
