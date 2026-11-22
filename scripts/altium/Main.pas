@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.11.07.5';
+    SCRIPT_VERSION = '2026.11.22.1';
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack
@@ -56,6 +56,7 @@ Const
     CONFIG_FILE = 'mcp_config.json';
     SAVING_FILE = 'saving.json';
     PREFS_FILE = 'preferences.json';
+    PROJECT_LISTED_FILE = 'project_members.txt';
 
     // ISch_RobotManager SendMessage IDs (from Altium Schematic API docs).
     SCHM_PrimitiveRegistration = 1;
@@ -116,6 +117,12 @@ Var
     { a compile only while it has not moved.                             }
     WriteSerial : Integer;
     CompiledAtSerial : Integer;
+    { Bumped by every command that does more than look (CommandOnlyLooks), }
+    { counted where every command passes; with LoopStartTick it tells a   }
+    { reader whether a board it read may have changed (the stamp section  }
+    { of pcb.get_layout_model).                                            }
+    CommandSerial : Integer;
+    LoopStartTick : Cardinal;
     { Documents the last save pass actually reached. See
       SaveOneDocByDocRef. Reset by App_SaveAll before each pass. }
     SaveAttempts : Integer;
@@ -133,6 +140,12 @@ Var
     { Full paths of the OutJobs proj_run_outjob opened, each
       wrapped in '|'. The next run closes them. See CloseRunOutJobs. }
     RunOutJobsOpened : String;
+    { What each open project's file names, as far as the bridge knows. One
+      record per project: Chr(1) PATH Chr(2) file age Chr(2) member file
+      names Chr(3), the path upper case, each name upper case and wrapped
+      in '|'. Kept in PROJECT_LISTED_FILE too. See ProjectListedNames. }
+    ProjectListed : String;
+    ProjectListedRead : String;
     { Documents the current save pass has already handled, wrapped in '|'.
       A free document is reached once per project walk, and the second
       visit would report a library it had just written as left alone. }
@@ -166,10 +179,31 @@ Var
     ClosingMode : String;
     UiAutomationMode : String;
     KeepInViewMode : String;
+    { LengthUnits, 'mil' or 'mm': the unit a new AI session reads and    }
+    { writes lengths in (the Python side converts). Default mil.         }
+    LengthUnits : String;
     { DialogMode 'auto' lets a tool answer the dialog it opens (the      }
     { change order, the Teardrops options); 'manual' leaves it to the    }
     { user. Default auto; the Python side does the answering.            }
     DialogMode : String;
+    { UsageMode 'on' counts each tool call's token cost (the Python side  }
+    { does the counting). Default off.                                    }
+    UsageMode : String;
+    { RoutingMode is the routing discipline: 'enforced' (the default),    }
+    { 'advisory' or 'off'. The Python side holds the router to it.        }
+    RoutingMode : String;
+    { Basic3dMode 'allowed' lets a footprint keep extruded, cylinder or   }
+    { sphere bodies as its 3D model; 'not_allowed' (the default) has the  }
+    { Python side report them and ask before replacing them.              }
+    Basic3dMode : String;
+    { AutorouterMode 'allowed' lets the AI start Altium's own autorouter; }
+    { 'not_allowed' (the default) has the Python side refuse it.          }
+    AutorouterMode : String;
+    { ChecksOff lists the checks switched off on the Config tab, by name,  }
+    { comma separated (footprint_drawing, symbol_pins, pins_pads,         }
+    { model_body, spice_model, fab_export). Empty, the default, keeps    }
+    { every check on; the Python side runs them.                         }
+    ChecksOff : String;
     LastCompiledProject : IProject;
     { Sheets a project-wide read asked for in the current request, and how }
     { many were not loaded and so not read. Reset per request by           }
@@ -330,6 +364,12 @@ Begin
             Remaining := '';
             Exit;
         End;
+        { A field always starts with its key, so a run of exactly three  }
+        { tildes is a value ending in '~' (KiCad's empty field) and then }
+        { the separator: the value keeps its tilde.                      }
+        If (SepPos + 2 <= Length(Remaining)) And (Remaining[SepPos + 2] = '~') Then
+            If Not ((SepPos + 3 <= Length(Remaining)) And (Remaining[SepPos + 3] = '~')) Then
+                SepPos := SepPos + 1;
         Result := Copy(Remaining, 1, SepPos - 1);
         Remaining := Copy(Remaining, SepPos + 2, Length(Remaining));
         If Result <> '' Then Exit;
@@ -675,20 +715,25 @@ Begin
     Else Result := Copy(Rec, 1, P - 1);
 End;
 
-Procedure OwnerSet(Key : String; Tag : String; Command : String);
+{ Forget the owner record of KEY, if there is one. }
+Procedure OwnerDrop(Key : String);
 Var
     P, E : Integer;
     Rest : String;
 Begin
     If Key = '' Then Exit;
     P := Pos(Chr(1) + Key + Chr(2), DocOwners);
-    If P > 0 Then
-    Begin
-        Rest := Copy(DocOwners, P, Length(DocOwners));
-        E := Pos(Chr(3), Rest);
-        If E > 0 Then
-            DocOwners := Copy(DocOwners, 1, P - 1) + Copy(Rest, E + 1, Length(Rest));
-    End;
+    If P = 0 Then Exit;
+    Rest := Copy(DocOwners, P, Length(DocOwners));
+    E := Pos(Chr(3), Rest);
+    If E > 0 Then
+        DocOwners := Copy(DocOwners, 1, P - 1) + Copy(Rest, E + 1, Length(Rest));
+End;
+
+Procedure OwnerSet(Key : String; Tag : String; Command : String);
+Begin
+    If Key = '' Then Exit;
+    OwnerDrop(Key);
     DocOwners := DocOwners + Chr(1) + Key + Chr(2) + Tag + Chr(2)
         + IntToStr(GetTickCount) + Chr(2) + Command + Chr(3);
 End;
@@ -957,25 +1002,100 @@ Begin
 End;
 
 {..............................................................................}
+{ ProjectBoardPaths - every PcbDoc of one project, joined with '|'.           }
+{ '' when the project is Nil or holds no board.                               }
+{..............................................................................}
+
+Function ProjectBoardPaths(Project : IProject) : String;
+Var
+    Doc : IDocument;
+    Path : String;
+    I : Integer;
+Begin
+    Result := '';
+    If Project = Nil Then Exit;
+    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(I);
+        If Doc = Nil Then Continue;
+        Path := '';
+        Try Path := Doc.DM_FullPath; Except End;
+        If Path = '' Then Continue;
+        If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
+           (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
+        If Result <> '' Then Result := Result + '|';
+        Result := Result + Path;
+    End;
+End;
+
+{ CountBoardPaths - how many paths a ProjectBoardPaths list holds. }
+Function CountBoardPaths(Paths : String) : Integer;
+Var
+    I : Integer;
+Begin
+    Result := 0;
+    If Paths = '' Then Exit;
+    Result := 1;
+    For I := 1 To Length(Paths) Do
+        If Copy(Paths, I, 1) = '|' Then Inc(Result);
+End;
+
+{ ProjectOwningPath - the open project that lists FilePath among its   }
+{ documents, or Nil. A document can sit in several projects; the first }
+{ wins, which is the one the Projects panel shows it under.             }
+Function ProjectOwningPath(Workspace : IWorkspace; FilePath : String) : IProject;
+Var
+    Project : IProject;
+    Doc : IDocument;
+    Path : String;
+    I, P : Integer;
+Begin
+    Result := Nil;
+    If (Workspace = Nil) Or (FilePath = '') Then Exit;
+    For P := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Project := Workspace.DM_Projects(P);
+        If Project = Nil Then Continue;
+        For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(I);
+            If Doc = Nil Then Continue;
+            Path := '';
+            Try Path := Doc.DM_FullPath; Except End;
+            If UpperCase(Path) = UpperCase(FilePath) Then
+            Begin
+                Result := Project;
+                Exit;
+            End;
+        End;
+    End;
+End;
+
+{..............................................................................}
 { GetPCBBoardAnywhere - Focus-independent PCB board lookup.                    }
 {                                                                              }
-{ When no board is focused it answers from the first PcbDoc of the open        }
-{ projects, and the reply then names that board (BoardFallbackNote), so a     }
-{ caller can tell it from the one it meant. With a PcbLib in front the caller  }
-{ is working on a library, not a board: it answers only when exactly one board }
-{ is open, and with several gives Nil with the reason in BoardMissWhy, rather  }
-{ than reading or writing whichever board the walk reached first.             }
+{ With a board in front it answers from that board. Otherwise it picks a board }
+{ only when the choice is unambiguous, and the reply then names that board     }
+{ (BoardFallbackNote):                                                         }
+{   1. the project that owns the document in front holds exactly one board:    }
+{      that board (a schematic's own PCB, whatever else is open);              }
+{   2. that project holds none (or the document is in no project, or is the    }
+{      script project), and exactly one board is open across all projects.     }
+{ Any other case gives Nil with the reason and the candidates in BoardMissWhy, }
+{ rather than reading or writing whichever board a walk reached first: with    }
+{ several projects open, the first board was routinely from an unrelated      }
+{ design and the reply looked exactly like the one the caller meant.           }
 {..............................................................................}
 
 Function GetPCBBoardAnywhere(Dummy : Integer): IPCB_Board;
 Var
     Workspace : IWorkspace;
-    Project : IProject;
+    Project, Owner : IProject;
     Doc : IDocument;
     ServerDoc : IServerDocument;
     PrevView : IServerDocumentView;
-    Path, FocusKind, Candidates : String;
-    I, P, Found : Integer;
+    Path, FocusKind, FocusPath, Candidates, AllBoards, Picked, Scope : String;
+    P, Found : Integer;
 Begin
     Result := Nil;
 
@@ -992,90 +1112,89 @@ Begin
     { polling loop. So only touch PCBServer when a PCB is actually focused.  }
     Doc := Workspace.DM_FocusedDocument;
     FocusKind := '';
+    FocusPath := '';
     If Doc <> Nil Then
+    Begin
         Try FocusKind := UpperCase(Doc.DM_DocumentKind); Except End;
+        Try FocusPath := Doc.DM_FullPath; Except End;
+    End;
     If FocusKind = 'PCB' Then
     Begin
         Result := PCBServer.GetCurrentPCBBoard;
         If Result <> Nil Then Exit;
     End;
 
-    { A library in front: a board is meant only when there is just one. }
-    If FocusKind = 'PCBLIB' Then
+    { Pick the board. The owning project first: a schematic or a library   }
+    { of a design means that design's board. A library package or the     }
+    { script project owns no board, and falls through to the open-wide    }
+    { rule.                                                                }
+    Picked := '';
+    Scope := '';
+    Owner := ProjectOwningPath(Workspace, FocusPath);
+    Candidates := ProjectBoardPaths(Owner);
+    Found := CountBoardPaths(Candidates);
+    If Found = 1 Then
+        Picked := Candidates
+    Else If Found > 1 Then
+        Scope := 'its project ' + ExtractFileName(Owner.DM_ProjectFullPath)
+            + ' holds ' + IntToStr(Found) + ' boards'
+    Else
     Begin
-        Found := 0;
-        Candidates := '';
+        AllBoards := '';
         For P := 0 To Workspace.DM_ProjectCount - 1 Do
         Begin
             Project := Workspace.DM_Projects(P);
-            If Project = Nil Then Continue;
-            For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
-            Begin
-                Doc := Project.DM_LogicalDocuments(I);
-                If Doc = Nil Then Continue;
-                Path := '';
-                Try Path := Doc.DM_FullPath; Except End;
-                If Path = '' Then Continue;
-                If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
-                   (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
-                Found := Found + 1;
-                If Candidates <> '' Then Candidates := Candidates + ', ';
-                Candidates := Candidates + Path;
-            End;
+            Candidates := ProjectBoardPaths(Project);
+            If Candidates = '' Then Continue;
+            If AllBoards <> '' Then AllBoards := AllBoards + '|';
+            AllBoards := AllBoards + Candidates;
         End;
-        If Found > 1 Then
-        Begin
-            BoardMissWhy := 'A PCB library is in front and ' + IntToStr(Found)
-                + ' boards are open (' + Candidates + '), so no board was '
-                + 'picked. For the library use the lib_ tools; for a board, '
-                + 'focus it first.';
-            Exit;
-        End;
+        Candidates := AllBoards;
+        Found := CountBoardPaths(Candidates);
+        If Found = 1 Then
+            Picked := Candidates
+        Else If Found > 1 Then
+            Scope := IntToStr(Found) + ' boards are open across the projects';
     End;
 
-    { Fallback: no PCB tab is focused (the user is on a schematic, a library }
-    { or the script project). Walk EVERY project open in the workspace - not }
-    { just the focused one, which is often the script project with no PcbDoc }
-    { - find the first PcbDoc, and open it. Opening the document loads the   }
-    { PCB server and moves focus to it; a non-nil ServerDoc from            }
-    { OpenDocument('PCB', ...) proves the server is now registered, so the   }
-    { GetCurrentPCBBoard read below is safe. The IPCB_Board pointer stays    }
-    { valid after we restore the user's previous view.                       }
+    If Picked = '' Then
+    Begin
+        If Found > 1 Then
+        Begin
+            If FocusKind = '' Then FocusKind := 'no document';
+            BoardMissWhy := 'No board is in front (' + FocusKind + ') and '
+                + Scope + ' ('
+                + StringReplace(Candidates, '|', ', ', MkSet(rfReplaceAll))
+                + '), so no board was picked. Focus the board first'
+                + ' (pcb_focus_board), or pass its path where the tool takes one.';
+            If FocusKind = 'PCBLIB' Then
+                BoardMissWhy := BoardMissWhy + ' For the library use the lib_ tools.';
+        End;
+        Exit;
+    End;
+
+    { Open the picked board. Opening loads the PCB server and moves focus   }
+    { to it; a non-nil ServerDoc from OpenDocument('PCB', ...) proves the   }
+    { server is now registered, so the GetCurrentPCBBoard read below is     }
+    { safe. The IPCB_Board pointer stays valid after we restore the user's  }
+    { previous view.                                                        }
     PrevView := Nil;
     Try
         If (Client <> Nil) Then PrevView := Client.GetCurrentView;
     Except End;
 
-    For P := 0 To Workspace.DM_ProjectCount - 1 Do
+    Path := Picked;
+    ServerDoc := Nil;
+    Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
+    If ServerDoc <> Nil Then
     Begin
-        Project := Workspace.DM_Projects(P);
-        If Project = Nil Then Continue;
-
-        For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Try Client.ShowDocument(ServerDoc); Except End;
+        Try Result := PCBServer.GetCurrentPCBBoard; Except End;
+        If Result <> Nil Then
         Begin
-            Doc := Project.DM_LogicalDocuments(I);
-            If Doc = Nil Then Continue;
-            Path := '';
-            Try Path := Doc.DM_FullPath; Except End;
-            If Path = '' Then Continue;
-            If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
-               (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
-
-            ServerDoc := Nil;
-            Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
-            If ServerDoc = Nil Then Continue;
-
-            Try Client.ShowDocument(ServerDoc); Except End;
-            Try Result := PCBServer.GetCurrentPCBBoard; Except End;
-            If Result <> Nil Then
-            Begin
-                BoardFallbackPath := Path;
-                BoardFallbackFrom := FocusKind;
-                Break;
-            End;
+            BoardFallbackPath := Path;
+            BoardFallbackFrom := FocusKind;
         End;
-
-        If Result <> Nil Then Break;
     End;
 
     { Restore the user's prior view so the focus blink is invisible. }
@@ -1163,8 +1282,8 @@ End;
 { GetPCBBoardForMutation - the board an EDIT is allowed to touch.              }
 {                                                                              }
 { GetPCBBoardAnywhere WANDERS, and that is correct for a read. When no PcbDoc  }
-{ is focused it walks every open project, opens the first board it finds,      }
-{ reads it, and restores the previous view so the focus change is invisible.   }
+{ is focused it opens the board of the front document's project, or the only  }
+{ open board, and restores the previous view so the focus change is invisible. }
 { For a query that is a convenience. For a DELETE it is a misfire: with a      }
 { library focused and two boards open, obj_delete would remove primitives from }
 { whichever board the walk reached first, and hide the fact that it had        }
@@ -1374,6 +1493,212 @@ Begin
     End;
 End;
 
+Function LoadTextFile(SL : TStringList; FilePath : String) : Boolean;
+Var
+    Stream : THandleStream;
+    Attempt : Integer;
+    Handle : Integer;
+    Ok : Boolean;
+Begin
+    { Read every file through here, never SL.LoadFromFile. A sharing          }
+    { violation inside LoadFromFile's TFileStream arrived as a modal          }
+    { EFOpenError on Altium Designer 26.10.1.5 before the surrounding         }
+    { Try/Except ran, stalling the polling loop. FileOpen returns -1 on a     }
+    { sharing violation instead of raising, and once the handle is held       }
+    { LoadFromStream has no open left to fail. The lock is usually brief (a   }
+    { scanner touching a freshly written file), so retry for about 180 ms.    }
+    { False when the file is missing or stayed locked; SL is then empty.      }
+    Ok := False;
+    SL.Text := '';
+    If FileExists(FilePath) Then
+    Begin
+        Attempt := 0;
+        While Attempt < 12 Do
+        Begin
+            Inc(Attempt);
+            Handle := FileOpen(FilePath, fmOpenRead Or fmShareDenyNone);
+            If Handle <> -1 Then
+            Begin
+                Try
+                    Stream := THandleStream.Create(Handle);
+                    Try
+                        Try
+                            SL.LoadFromStream(Stream);
+                            Ok := True;
+                        Except
+                            Ok := False;
+                        End;
+                    Finally
+                        Stream.Free;
+                    End;
+                Finally
+                    FileClose(Handle);
+                End;
+            End;
+            If Ok Then Break;
+            Sleep(15);
+        End;
+    End;
+    Result := Ok;
+End;
+
+{ Whether a project's own file has something to write. Altium keeps no    }
+{ modified flag for a project that a script can read: after a sheet was   }
+{ renamed in the Projects panel, or a harness definition was added, the   }
+{ panel showed the project modified while its document read Modified      }
+{ false, and app_save_all left the file naming a sheet that no longer     }
+{ existed (#291, measured on AD 26.11). So every member with a file must  }
+{ be among the names the project file was written with; a renamed sheet's }
+{ new name, or an added document, is not. Names are not checked the other }
+{ way: Altium leaves sections of removed documents in the file, so a      }
+{ removal alone asks for no save here. Members with no file (the          }
+{ project's ActiveBOM.VirtualBOM) are not counted.                        }
+{                                                                         }
+{ The project file is never opened for this. What it names is what the    }
+{ project held when the file was last written: see ProjectListedNames.    }
+
+{ The file names of a project's members that have a file, upper case,     }
+{ each wrapped in '|'.                                                    }
+Function ProjectMemberNames(Project : IProject) : String;
+Var
+    J : Integer;
+    Doc : IDocument;
+    Entry, Names : String;
+Begin
+    Names := '|';
+    If Project <> Nil Then
+        For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(J);
+            If Doc = Nil Then Continue;
+            Entry := '';
+            Try Entry := Doc.DM_FullPath; Except End;
+            If (Entry = '') Or (Not FileExists(Entry)) Then Continue;
+            Entry := UpperCase(ExtractFileName(Entry));
+            If Pos('|' + Entry + '|', Names) = 0 Then Names := Names + Entry + '|';
+        End;
+    Result := Names;
+End;
+
+{ The member names a project's file was written with, as ProjectMemberNames }
+{ gives them.                                                               }
+{                                                                           }
+{ Altium writes every member when it writes the project file, and loads     }
+{ every one the file names. So the names are recorded the first time a      }
+{ project is seen and again whenever its file's time has changed, and they  }
+{ stand until the file is written again. NoteOpenProjects records each open }
+{ project before every command, so a change made after that is measured     }
+{ against the record. The records are kept in the workspace folder too, and }
+{ one whose file time still matches is used after a restart of the loop.    }
+{                                                                           }
+{ A file time has a two second step: a project file written twice within it }
+{ keeps the first record, and reads as needing a save until the next write. }
+Function ProjectListedNames(Project : IProject) : String;
+Var
+    Path, Key, Rec, Names, Rest : String;
+    P, Age : Integer;
+    Store : TStringList;
+Begin
+    Names := '';
+    Path := '';
+    If Project <> Nil Then Try Path := Project.DM_ProjectFullPath; Except End;
+    If (Path <> '') And FileExists(Path) Then
+    Begin
+        If ProjectListedRead <> 'yes' Then
+        Begin
+            ProjectListedRead := 'yes';
+            ProjectListed := '';
+            Store := TStringList.Create;
+            Try
+                If (WorkspaceDir <> '') And LoadTextFile(Store, WorkspaceDir + PROJECT_LISTED_FILE) Then
+                    ProjectListed := Store.Text;
+            Finally
+                Store.Free;
+            End;
+        End;
+        Age := -1;
+        Try Age := FileAge(Path); Except Age := -1; End;
+        Key := Chr(1) + UpperCase(Path) + Chr(2);
+        P := Pos(Key, ProjectListed);
+        If P > 0 Then
+        Begin
+            Rest := Copy(ProjectListed, P + Length(Key), Length(ProjectListed));
+            Rec := Copy(Rest, 1, Pos(Chr(3), Rest) - 1);
+            If Copy(Rec, 1, Pos(Chr(2), Rec) - 1) = IntToStr(Age) Then
+                Names := Copy(Rec, Pos(Chr(2), Rec) + 1, Length(Rec))
+            Else
+            Begin
+                ProjectListed := Copy(ProjectListed, 1, P - 1)
+                    + Copy(Rest, Length(Rec) + 2, Length(Rest));
+                P := 0;
+            End;
+        End;
+        If P = 0 Then
+        Begin
+            Names := ProjectMemberNames(Project);
+            If Length(ProjectListed) > 200000 Then ProjectListed := '';
+            ProjectListed := ProjectListed + Key + IntToStr(Age) + Chr(2) + Names + Chr(3);
+            If WorkspaceDir <> '' Then
+            Begin
+                Store := TStringList.Create;
+                Try
+                    Store.Text := ProjectListed;
+                    Try Store.SaveToFile(WorkspaceDir + PROJECT_LISTED_FILE); Except { kept in memory } End;
+                Finally
+                    Store.Free;
+                End;
+            End;
+        End;
+    End;
+    Result := Names;
+End;
+
+{ Record what every open project's file names, before a command can change }
+{ a project. See ProjectListedNames.                                        }
+Procedure NoteOpenProjects(Dummy : Integer);
+Var
+    Workspace : IWorkspace;
+    I : Integer;
+Begin
+    Try
+        Workspace := GetWorkspace;
+        If Workspace = Nil Then Exit;
+        For I := 0 To Workspace.DM_ProjectCount - 1 Do
+            ProjectListedNames(Workspace.DM_Projects(I));
+    Except { a project that cannot be read is recorded when it can } End;
+End;
+
+Function ProjectFileNeedsSave(Project : IProject) : Boolean;
+Var
+    ProjDoc : IServerDocument;
+    Path, Listed, Names, One : String;
+    Needs : Boolean;
+Begin
+    Result := False;
+    If Project = Nil Then Exit;
+    Path := '';
+    Try Path := Project.DM_ProjectFullPath; Except End;
+    If (Path = '') Or (Not FileExists(Path)) Then Exit;
+    ProjDoc := Nil;
+    Try ProjDoc := Client.GetDocumentByPath(Path); Except End;
+    If ProjDoc = Nil Then Exit;
+    Needs := False;
+    Try Needs := ProjDoc.Modified; Except End;
+    If Not Needs Then
+    Begin
+        Listed := ProjectListedNames(Project);
+        Names := ProjectMemberNames(Project);
+        Names := Copy(Names, 2, Length(Names));
+        While Names <> '' Do
+        Begin
+            One := Copy(Names, 1, Pos('|', Names) - 1);
+            Names := Copy(Names, Pos('|', Names) + 1, Length(Names));
+            If (One <> '') And (Pos('|' + One + '|', Listed) = 0) Then Needs := True;
+        End;
+    End;
+    Result := Needs;
+End;
+
 Procedure SaveProjectMembers(Project : IProject);
 Var
     J : Integer;
@@ -1385,9 +1710,11 @@ Begin
     // The project file itself, when it's a real on-disk project
     Try
         ProjectServerDoc := Client.GetDocumentByPath(Project.DM_ProjectFullPath);
-        If (ProjectServerDoc <> Nil) And ProjectServerDoc.Modified Then
+        If (ProjectServerDoc <> Nil) And ProjectFileNeedsSave(Project) Then
             If Not SaveHeldBack(Project.DM_ProjectFullPath) Then
             Begin
+                SaveAttempts := SaveAttempts + 1;
+                Try ProjectServerDoc.SetModified(True); Except { CountDirtyInProject reports what stayed unsaved } End;
                 Try ProjectServerDoc.DoFileSave(''); Except { CountDirtyInProject reports what stayed unsaved } End;
             End;
     Except { CountDirtyInProject reports what stayed unsaved } End;
@@ -1421,6 +1748,9 @@ Begin
             Except End;
         End;
     End;
+    { The project file counts too: a still_dirty of 0 that missed it left }
+    { a project naming a file no longer on disk (#291).                   }
+    If ProjectFileNeedsSave(Project) Then Result := Result + 1;
 End;
 
 Function CountDirtyDocuments(Dummy : Integer): Integer;
@@ -1593,6 +1923,14 @@ Begin
                 Result := Result + Path;
             End;
         End;
+        { The project file is written by a save-all too, and measured. }
+        Path := '';
+        Try Path := Project.DM_ProjectFullPath; Except End;
+        If (Path <> '') And FileExists(Path) Then
+        Begin
+            If Result <> '' Then Result := Result + '|';
+            Result := Result + Path;
+        End;
     End;
 End;
 
@@ -1758,54 +2096,6 @@ End;
 { JSON Helper Functions                                                        }
 {..............................................................................}
 
-Function LoadTextFile(SL : TStringList; FilePath : String) : Boolean;
-Var
-    Stream : THandleStream;
-    Attempt : Integer;
-    Handle : Integer;
-    Ok : Boolean;
-Begin
-    { Read every file through here, never SL.LoadFromFile. A sharing          }
-    { violation inside LoadFromFile's TFileStream arrived as a modal          }
-    { EFOpenError on Altium Designer 26.10.1.5 before the surrounding         }
-    { Try/Except ran, stalling the polling loop. FileOpen returns -1 on a     }
-    { sharing violation instead of raising, and once the handle is held       }
-    { LoadFromStream has no open left to fail. The lock is usually brief (a   }
-    { scanner touching a freshly written file), so retry for about 180 ms.    }
-    { False when the file is missing or stayed locked; SL is then empty.      }
-    Ok := False;
-    SL.Text := '';
-    If FileExists(FilePath) Then
-    Begin
-        Attempt := 0;
-        While Attempt < 12 Do
-        Begin
-            Inc(Attempt);
-            Handle := FileOpen(FilePath, fmOpenRead Or fmShareDenyNone);
-            If Handle <> -1 Then
-            Begin
-                Try
-                    Stream := THandleStream.Create(Handle);
-                    Try
-                        Try
-                            SL.LoadFromStream(Stream);
-                            Ok := True;
-                        Except
-                            Ok := False;
-                        End;
-                    Finally
-                        Stream.Free;
-                    End;
-                Finally
-                    FileClose(Handle);
-                End;
-            End;
-            If Ok Then Break;
-            Sleep(15);
-        End;
-    End;
-    Result := Ok;
-End;
 
 Function ReadFileContent(FilePath : String) : String;
 Var
@@ -2647,7 +2937,13 @@ Begin
     ClosingMode := 'allowed';
     UiAutomationMode := 'on';
     KeepInViewMode := 'off';
+    LengthUnits := 'mil';
     DialogMode := 'auto';
+    UsageMode := 'off';
+    RoutingMode := 'enforced';
+    Basic3dMode := 'not_allowed';
+    AutorouterMode := 'not_allowed';
+    ChecksOff := '';
     If Not FileExists(WorkspaceDir + PREFS_FILE) Then Exit;
     Content := ReadFileContent(WorkspaceDir + PREFS_FILE);
     ValueFormat := LowerCase(ExtractJsonValue(Content, 'value_format'));
@@ -2661,6 +2957,13 @@ Begin
     If LowerCase(ExtractJsonValue(Content, 'ui_automation')) = 'off' Then UiAutomationMode := 'off';
     If LowerCase(ExtractJsonValue(Content, 'keep_in_view')) = 'on' Then KeepInViewMode := 'on';
     If LowerCase(ExtractJsonValue(Content, 'dialogs')) = 'manual' Then DialogMode := 'manual';
+    If LowerCase(ExtractJsonValue(Content, 'length_units')) = 'mm' Then LengthUnits := 'mm';
+    If LowerCase(ExtractJsonValue(Content, 'usage')) = 'on' Then UsageMode := 'on';
+    If LowerCase(ExtractJsonValue(Content, 'routing')) = 'advisory' Then RoutingMode := 'advisory';
+    If LowerCase(ExtractJsonValue(Content, 'routing')) = 'off' Then RoutingMode := 'off';
+    If LowerCase(ExtractJsonValue(Content, 'basic_3d_models')) = 'allowed' Then Basic3dMode := 'allowed';
+    If LowerCase(ExtractJsonValue(Content, 'altium_autorouter')) = 'allowed' Then AutorouterMode := 'allowed';
+    ChecksOff :=LowerCase(ExtractJsonValue(Content, 'checks_off'));
 End;
 
 Procedure StorePreferences(Dummy : Integer);
@@ -2670,7 +2973,13 @@ Begin
         + '","edits":"' + EditsMode + '","deleting":"' + DeletingMode
         + '","closing":"' + ClosingMode + '","ui_automation":"' + UiAutomationMode
         + '","keep_in_view":"' + KeepInViewMode
-        + '","dialogs":"' + DialogMode + '"}');
+        + '","length_units":"' + LengthUnits
+        + '","dialogs":"' + DialogMode
+        + '","usage":"' + UsageMode
+        + '","routing":"' + RoutingMode
+        + '","basic_3d_models":"' + Basic3dMode
+        + '","altium_autorouter":"' + AutorouterMode
+        + '","checks_off":"' + ChecksOff + '"}');
 End;
 
 {..............................................................................}
@@ -3171,6 +3480,8 @@ Begin
     DocOwners := '';
     WriteSerial := 0;
     CompiledAtSerial := -1;
+    CommandSerial := 0;
+    LoopStartTick := GetTickCount;
     HoldStartTick := 0;
     LastDoneTick := 0;
     JustPicked := False;

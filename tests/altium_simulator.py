@@ -267,6 +267,9 @@ def _next_batch_op(remaining: str) -> tuple[str, str]:
         sep = remaining.find("~~")
         if sep < 0:
             return remaining, ""
+        # Exactly three tildes: a value ending in "~", then the separator.
+        if remaining[sep + 2:sep + 3] == "~" and remaining[sep + 3:sep + 4] != "~":
+            sep += 1
         op, remaining = remaining[:sep], remaining[sep + 2:]
         if op:
             return op, remaining
@@ -284,6 +287,26 @@ def _iter_batch_ops(payload: str):
         if not remaining:
             return
 
+
+
+_PAD_SHAPES = ("round", "rectangular", "octagonal", "roundrect")
+
+
+def _pad_shape_word(raw: str) -> str:
+    """Mirrors CanonicalPadShape: the shape word, "" when none was given,
+    or "?" and the word as given when it is not a pad shape."""
+    s = str(raw or "").strip().lower()
+    if s in ("roundrectangle", "roundedrect", "rounded_rectangular"):
+        s = "roundrect"
+    if s == "" or s in _PAD_SHAPES:
+        return s
+    return "?" + str(raw).strip()
+
+
+def _pad_shape_refusal(words: str) -> str:
+    """Mirrors PadShapeRefusal."""
+    return ("shape must be round, rectangular, octagonal or roundrect "
+            "(got: %s)" % words)
 
 
 def _int_or_zero(text: str) -> int:
@@ -350,6 +373,9 @@ class AltiumSimulator:
         #: What the bulk library handlers accepted, so a test can assert
         #: on the PARSED payload rather than only on a success count.
         self.lib_pins: list[dict] = []
+        # The symbol add_pins writes into: the one created last, as
+        # Lib_AddPins's GetTargetLibComponent picks it (#263).
+        self.lib_target: str = ""
         self.lib_symbol_texts: list[dict] = []
         self.lib_pads: list[dict] = []
         self.lib_tracks: list[dict] = []
@@ -1173,9 +1199,22 @@ class AltiumSimulator:
                 return _build_error_response(rid, "NO_SCHLIB",
                                              "No schematic library is active")
             self.lib_components.append(MockLibComponent(name))
+            self.lib_target = name
             return _build_success_response(
                 rid, '{"success":true,"name":"' + _escape_json_string(name) + '"}'
             )
+
+        elif action == "get_pin_list":
+            # Mirrors Lib_GetPinList: the named symbol's pins, every part.
+            name = params.get("component_name", "")
+            pins = [p for p in self.lib_pins if p.get("component") == name]
+            body = ",".join(
+                '{"designator":"%s","name":"%s"}' % (
+                    _escape_json_string(p["designator"]),
+                    _escape_json_string(p["name"])) for p in pins)
+            return _build_success_response(
+                rid, '{"component":"%s","count":%d,"pins":[%s]}' % (
+                    _escape_json_string(name), len(pins), body))
 
         elif action == "add_pin":
             designator = params.get("designator", "")
@@ -1202,6 +1241,7 @@ class AltiumSimulator:
                 if _get_batch_field(op, "designator").strip():
                     added += 1
                     self.lib_pins.append({
+                        "component": self.lib_target,
                         "designator": _get_batch_field(op, "designator"),
                         "name": _get_batch_field(op, "name"),
                         "electrical_type": _get_batch_field(
@@ -1234,6 +1274,17 @@ class AltiumSimulator:
             if not params.get("pads"):
                 return _build_error_response(rid, "MISSING_PARAM",
                                              "pads is required")
+            # An unknown shape word refuses the whole batch before any pad
+            # is made, as the Pascal does.
+            bad: list[str] = []
+            for op in _iter_batch_ops(params.get("pads", "")):
+                word = _pad_shape_word(_get_batch_field(op, "shape"))
+                if word.startswith("?") and word[1:] not in bad:
+                    bad.append(word[1:])
+            if bad:
+                return _build_error_response(
+                    rid, "INVALID_SHAPE",
+                    _pad_shape_refusal(", ".join(bad)) + "; no pad was added")
             if not self.lib_has_pcblib:
                 return _build_error_response(rid, "NO_PCBLIB",
                                              "No PCB library is active")
@@ -1349,6 +1400,11 @@ class AltiumSimulator:
             )
 
         elif action == "add_footprint_pad":
+            word = _pad_shape_word(params.get("shape", ""))
+            if word.startswith("?"):
+                return _build_error_response(
+                    rid, "INVALID_SHAPE",
+                    _pad_shape_refusal(word[1:]) + "; no pad was added")
             designator = params.get("designator", "")
             return _build_success_response(
                 rid,
@@ -1367,6 +1423,28 @@ class AltiumSimulator:
                 rid,
                 '{"success":true,"footprint":"' + _escape_json_string(fp_name) + '"}'
             )
+
+        elif action == "get_pad_geometry":
+            # Mirrors Lib_GetPadGeometry's reply: every land in millimetres.
+            # The simulator keeps one footprint's pads, sent in mils.
+            def _mm(v):
+                try:
+                    return float(v or 0) * 0.0254
+                except ValueError:
+                    return 0.0
+            rows = []
+            for p in self.lib_pads:
+                rows.append(
+                    '{"name":"' + _escape_json_string(p.get("designator", "")) + '",'
+                    '"x_mm":%.6f,"y_mm":%.6f,"w_mm":%.6f,"h_mm":%.6f,' % (
+                        _mm(p.get("x")), _mm(p.get("y")),
+                        _mm(p.get("x_size")), _mm(p.get("y_size")))
+                    + '"shape":"' + _escape_json_string(p.get("shape", "")) + '",'
+                    + '"rotation":%.3f}' % float(p.get("rotation") or 0))
+            fp = params.get("footprint_name", "")
+            return _build_success_response(
+                rid, '{"name":"' + _escape_json_string(fp) + '","pad_count":'
+                + str(len(rows)) + ',"pads":[' + ",".join(rows) + ']}')
 
         elif action == "link_3d_model":
             model_name = params.get("model_name", "")
@@ -1691,6 +1769,53 @@ class AltiumSimulator:
             return _build_success_response(
                 rid, '{"success":true,"x":' + str(x) + ',"y":' + str(y)
                 + ',"context":"pcb"}')
+        elif action == "zoom_to_object":
+            # Gen_ZoomToObject: the named object on the sheet, matched without
+            # case. The mock sheet holds net labels (Text) and parts
+            # (Designator.Text) with a location but no extent, so a match's
+            # box is its location.
+            name = str(params.get("name", "")).strip()
+            if not name:
+                return _build_error_response(
+                    rid, "MISSING_PARAMS", "name is required")
+            scale_text = str(params.get("scale", "")).strip()
+            try:
+                scale = float(scale_text) if scale_text else 50.0
+            except ValueError:
+                scale = -1.0
+            if not 0 < scale <= 100:
+                return _build_error_response(
+                    rid, "BAD_PARAMS", "scale is above 0 and up to 100")
+            index_text = str(params.get("index", "")).strip()
+            want = int(index_text) if index_text.isdigit() else (1 if not index_text else 0)
+            if want < 1:
+                return _build_error_response(
+                    rid, "BAD_PARAMS", "index counts the matches from 1")
+            kinds = {25: ("net_label", "Text"), 1: ("part", "Designator.Text")}
+            found = []
+            for obj in self.sch_objects:
+                kind = kinds.get(obj.object_id)
+                if kind is None:
+                    continue
+                text = obj.get_property(kind[1])
+                if text and text.upper() == name.upper():
+                    x, y = obj.get_property("Location.X"), obj.get_property("Location.Y")
+                    found.append('{"kind":"' + kind[0] + '","name":"'
+                                 + _escape_json_string(text) + '","box":['
+                                 + ",".join((x, y, x, y)) + ']}')
+            if not found:
+                return _build_error_response(
+                    rid, "NOT_FOUND", 'no object on this sheet is named "' + name + '"')
+            if want > len(found):
+                return _build_error_response(
+                    rid, "BAD_PARAMS", "index " + str(want) + ", but "
+                    + str(len(found)) + " object(s) are named that")
+            return _build_success_response(
+                rid, '{"success":true,"context":"schematic","name":"'
+                + _escape_json_string(name) + '","scale":' + repr(scale)
+                + ',"index":' + str(want) + ',"count":' + str(len(found))
+                + ',"zoomed_to":' + found[want - 1] + ',"matches":['
+                + ",".join(found) + '],"listed":' + str(len(found)) + '}')
         else:
             return _build_error_response(
                 rid, "UNKNOWN_ACTION",
@@ -1880,6 +2005,11 @@ class AltiumSimulator:
                              % _escape_json_string(d) for d in matched))))
 
         if action == "get_components":
+            mode = (params.get("body_heights") or "max").strip().lower()
+            if mode not in ("max", "all"):
+                return _build_error_response(
+                    rid, "BAD_BODY_HEIGHTS",
+                    'body_heights must be max or all, got "%s"' % mode)
             items = []
             for c in board.components:
                 x1, y1 = c.x - c.width // 2, c.y - c.height // 2
@@ -1893,6 +2023,9 @@ class AltiumSimulator:
                     '"footprint":"' + _escape_json_string(c.footprint) + '",'
                     '"source_designator":"' + _escape_json_string(c.designator) + '",'
                     '"height_mils":' + str(c.height_mils) + ','
+                    # The simulated board carries no 3D bodies.
+                    '"model_height_mils":null,"height_mismatch":false,'
+                    '"body_count":0,' + ('"bodies":[],' if mode == "all" else '') +
                     '"bbox":{"x1":' + str(x1) + ',"y1":' + str(y1) +
                     ',"x2":' + str(x2) + ',"y2":' + str(y2) +
                     ',"width":' + str(c.width) + ',"height":' + str(c.height) + '}}'
@@ -2030,6 +2163,7 @@ class AltiumSimulator:
                                 {"designator": comp.designator, "pin": pad, "net": net})
                 placed += 1
             data = ('{"placed":' + str(placed) + ',"failed":' + str(failed) +
+                    ',"label_layers_unknown":0' +
                     ',"total":' + str(placed + failed) + '}')
             return _build_success_response(rid, data)
 

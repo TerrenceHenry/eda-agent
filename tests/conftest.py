@@ -225,6 +225,45 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+# NO TEST STARTS ALTIUM OR ACTS ON A RUNNING ONE. A wait that runs out
+# leads the bridge to its crash check, which finds an Altium by its
+# process, presses OK on its dialogs and restarts its script loop
+# (relaunch --restart, X2.EXE -REditScript:Stop). On a machine with
+# Altium open that is the live session. So every test sees no Altium
+# process, and a launch of X2.EXE or of a relaunch is refused. A module
+# that fakes the process list itself sets FAKES_THE_PROCESS_LIST = True;
+# opted-in integration runs are left alone.
+_ALTIUM_LAUNCH = re.compile(r"x2\.exe|eda_agent\.server\W+relaunch|-REditScript|"
+                            r"-RScriptingSystem", re.IGNORECASE)
+
+
+class LaunchRefused(RuntimeError):
+    """A test tried to start Altium or its script loop."""
+
+
+@pytest.fixture(autouse=True)
+def _no_live_altium(request, monkeypatch):
+    if os.environ.get("EDA_AGENT_INTEGRATION") == "1":
+        yield
+        return
+    import subprocess
+    real_popen = subprocess.Popen
+
+    class _GuardedPopen(real_popen):
+        def __init__(self, args, *a, **k):
+            text = args if isinstance(args, str) else " ".join(map(str, args))
+            if _ALTIUM_LAUNCH.search(text):
+                raise LaunchRefused(f"a test may not run {text!r}")
+            super().__init__(args, *a, **k)
+
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
+    if not getattr(request.module, "FAKES_THE_PROCESS_LIST", False):
+        from eda_agent.bridge import process_manager as pm
+        monkeypatch.setattr(pm.AltiumProcessManager, "_candidates", lambda self: [])
+        monkeypatch.setattr(pm.AltiumProcessManager, "_scan_running", lambda self: False)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _fresh_bulk_hint_counts():
     """Start each test with no calls counted toward the repeat nudge.
@@ -237,6 +276,14 @@ def _fresh_bulk_hint_counts():
     from eda_agent.tools.bulk_hints import BulkHintTracker
     BulkHintTracker.reset()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_usage_records(monkeypatch):
+    """Tool calls made by tests are not counted (diag/usage would write
+    them into the real workspace's usage folder). A test of the counting
+    turns it back on for itself."""
+    monkeypatch.setenv("EDA_AGENT_USAGE_OFF", "1")
 
 
 @pytest.fixture(autouse=True)
@@ -689,3 +736,19 @@ def _no_leaked_easyeda_server():
         except Exception:
             pass
         easyeda_bridge._BRIDGE = None
+
+
+@pytest.fixture(autouse=True)
+def _library_session_marks_start_clear():
+    """The library tools remember, for the session, which symbol and
+    footprints were just made (their checks apply to those) and which pin
+    lists came from an import. A test that made a symbol left the mark for
+    whichever test ran next in the same process, where lib_add_pins then
+    asked for a datasheet it was never meant to need. Cleared after each
+    test."""
+    yield
+    from eda_agent.tools import library
+    from eda_agent.design import pin_table
+    library._NEW_SYMBOL.clear()
+    library._NEW_FOOTPRINTS.clear()
+    pin_table.IMPORTED.clear()

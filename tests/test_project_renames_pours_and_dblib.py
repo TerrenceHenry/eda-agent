@@ -19,6 +19,15 @@ import pytest
 from eda_agent.bridge import altium_bridge
 from eda_agent.tools import application, generic, library, pcb, project
 
+
+@pytest.fixture(autouse=True)
+def _no_pin_table(monkeypatch):
+    """These build symbols to check their layout; the pin table check has
+    its own tests (test_symbol_pins_against_the_pin_table.py)."""
+    from eda_agent import preferences
+    monkeypatch.setattr(preferences, "_read",
+                        lambda workspace=None: {"checks_off": "symbol_pins"})
+
 ALTIUM = Path(__file__).resolve().parents[1] / "scripts" / "altium"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -263,7 +272,9 @@ def test_a_body_centre_needs_the_body_and_is_checked_after_the_move(monkeypatch,
     answer = {"after": [{"index": 1, "center_x_mils": 10.0, "center_y_mils": -5.5}]}
     tools, bridge = _registered(library, "register_library_tools", monkeypatch,
                                 {"library.set_3d_body": answer})
-    monkeypatch.setattr(library.pcblib_models, "saved_body_models", lambda *a: [])
+    async def no_export(*a):
+        raise library.footprint_export.ExportFailed("not exported in this test")
+    monkeypatch.setattr(library.footprint_export, "read_export", no_export)
     no_body = asyncio.run(tools["lib_set_3d_body"](footprint_name="F", library_path=str(lib),
                                                    center_x=10))
     assert no_body["ok"] is False and not bridge.sent
@@ -464,7 +475,8 @@ def test_shared_pins_go_on_part_zero_at_one_place_on_every_part(monkeypatch):
         shared_pins={"left_pins": [{"designator": "8", "name": "V+"}],
                      "right_pins": [{"designator": "4", "name": "V-"}]}))
     assert made["ok"] and made["shared"] == ["8", "4"]
-    sent = bridge.sent[-1][1]["pins"].replace(" ", "")
+    # the pins call, not the last one: the view is refreshed after it
+    sent = next(p for c, p in bridge.sent if c == "library.add_pins")["pins"].replace(" ", "")
     rows = [dict(f.split("=", 1) for f in row.split(";") if "=" in f)
             for row in sent.split("~~") if row]
     owner = {r["designator"]: r["owner_part_id"] for r in rows}

@@ -20,34 +20,23 @@ def source(name):
     return strip_comments((ROOT / name).read_text(encoding="utf-8"))
 
 
-def check_resolvers(text):
-    uses = list(re.finditer(r"\beCustomShape\b", text))
-    assert uses, "no custom shape references found"
-    for use in uses:
-        # A separate nested statement, not And/Or: DelphiScript need not
-        # short circuit, and an unresolved identifier bypasses Try/Except.
-        assert re.search(
-            r"If PadCustomShapeSupported\(0\) Then\s+If (?:Pad\.TopShape|S) = $",
-            text[max(0, use.start() - 120):use.start()]), "unguarded custom shape"
-    return len(uses)
-
-
 def check_capabilities(text):
     routines = functions(text)
-    for name, minimum in (("PadCustomShapeSupported", 25), ("PadAdvancedMaskSupported", 25)):
-        body = routines[name]
-        assert "Client.GetProductVersion" in body
-        assert "Major := 0;" in body
-        assert "StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0)" in body
-        assert f"Result := Major >= {minimum};" in body
-        assert "eCustomShape" not in body
-        exception = "If Ver = '21.4.1.30' Then Result := True;"
-        if name == "PadAdvancedMaskSupported":
-            assert exception in body
-            assert body.count("Result :=") == 2
-        else:
-            assert exception not in body
-            assert body.count("Result :=") == 1
+    assert re.findall(r"(?im)^Function\s+PadCustomShapeSupported\b", text) == [
+        "Function PadCustomShapeSupported"]
+    assert "Result := AltiumVersionCode(0) >= 2208;" in routines["PadCustomShapeSupported"]
+    body = routines["PadAdvancedMaskSupported"]
+    assert "Client.GetProductVersion" in body
+    assert "Major := 0;" in body
+    assert "StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0)" in body
+    assert "Result := Major >= 25;" in body
+    assert "If Ver = '21.4.1.30' Then Result := True;" in body
+    assert body.count("Result :=") == 2
+
+
+def check_resolver(body):
+    assert re.search(r"If Not PadCustomShapeSupported\(0\) Then Exit;\s+"
+                     r"Result := S = eCustomShape;", body)
 
 
 def test_independent_capabilities_live_in_early_shared_unit():
@@ -59,27 +48,33 @@ def test_independent_capabilities_live_in_early_shared_unit():
 
 
 def test_every_shape_resolver_is_guarded():
-    counts = [check_resolvers(source(name)) for name in FILES]
+    utils = source("Utils.pas")
+    assert len(re.findall(r"\beCustomShape\b", utils)) == 1
+    check_resolver(functions(utils)["ShapeIsCustom"])
+    counts = []
+    for filename in FILES:
+        text = source(filename)
+        assert "eCustomShape" not in text
+        counts.append(text.count("ShapeIsCustom("))
     assert counts == [4, 1, 2, 1], "update expected coverage when adding a reader"
 
 
-@pytest.mark.parametrize("filename", FILES)
-def test_removing_any_gate_is_detected(filename):
-    text = source(filename)
-    gates = list(re.finditer(r"If PadCustomShapeSupported\(0\) Then", text))
-    assert gates
-    for gate in gates:
-        broken = text[:gate.start()] + text[gate.end():]
-        with pytest.raises(AssertionError, match="unguarded custom shape"):
-            check_resolvers(broken)
+def test_removing_the_shared_gate_is_detected():
+    body = functions(source("Utils.pas"))["ShapeIsCustom"]
+    broken = body.replace("If Not PadCustomShapeSupported(0) Then Exit;", "")
+    assert broken != body
+    with pytest.raises(AssertionError):
+        check_resolver(broken)
 
 
-@pytest.mark.parametrize("name", ["PadCustomShapeSupported", "PadAdvancedMaskSupported"])
-@pytest.mark.parametrize("minimum", [24, 26])
-def test_changing_either_measured_capability_floor_is_detected(name, minimum):
+@pytest.mark.parametrize("floor, changed", [
+    ("AltiumVersionCode(0) >= 2208", "AltiumVersionCode(0) >= 2207"),
+    ("Major >= 25", "Major >= 24"),
+    ("Major >= 25", "Major >= 26"),
+])
+def test_changing_either_capability_floor_is_detected(floor, changed):
     text = source("Utils.pas")
-    body = functions(text)[name]
-    broken = text.replace(body, body.replace("Major >= 25", f"Major >= {minimum}"))
+    broken = text.replace(floor, changed)
     assert broken != text
     with pytest.raises(AssertionError):
         check_capabilities(broken)
@@ -88,7 +83,7 @@ def test_changing_either_measured_capability_floor_is_detected(name, minimum):
 def test_unknown_shape_is_not_reported_as_round():
     for filename in FILES:
         text = source(filename)
-        uses = list(re.finditer(r"\beCustomShape\b", text))
+        uses = list(re.finditer(r"\bShapeIsCustom\(", text))
         assert uses
         for use in uses:
             # Restrict this check to the shape branch. The enclosing generic

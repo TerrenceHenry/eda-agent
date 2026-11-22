@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from ... import job_control
 from ..bench import copy_board
 from ..drc import usual_via_mask, verdict
 from ..model import LayoutBoard
@@ -27,29 +28,68 @@ def route_job(params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(board, LayoutBoard):
         raise ValueError("layout_route job requires a 'board' (LayoutBoard or its dict)")
     nets = params.get("nets")
+    from .brief import Brief, broken
+    brief = params.get("brief")
+    if isinstance(brief, dict):
+        brief = Brief.from_list(brief.get("entries") or [], brief.get("areas") or [],
+                                brief.get("loops") or [], brief.get("barriers") or [],
+                                brief.get("assembly"), brief.get("orient") or [],
+                                brief.get("pdn") or [])
+    elif not isinstance(brief, Brief):
+        brief = Brief.from_list(brief or [])
+    as_read = board          # its pours as Altium last poured them, for the findings
     board, old_pours = _without_old_pours(board)
     # The live view (design/live.py): the board before, progress while
     # routing (throttled), the routed board after.
     from ...design import live
     live.publish_safe(board, f"Routing {len(nets) if nets else 'all'} nets.", "route")
     t0 = time.perf_counter()
+    shown = live.progress_logger("route")
+
+    def log(text: str) -> None:
+        # Every line reaches design_job_status; the live view gets one
+        # every few seconds. A cancelled job leaves here too.
+        job_control.note(text)
+        shown(text)
+
     r = route_adaptive(board, nets=frozenset(nets) if nets else None,
                        planes=bool(params.get("planes", True)),
                        stages=params.get("stages"),
-                       log=live.progress_logger("route"))
+                       log=log, brief=brief,
+                       release=params.get("release"))
     out = r.apply()
     # The router's own tracks laid again as the shortest clean 45/90 runs;
     # the board's tracks before it stay as they are (gloss.py).
     glossed = None
     if params.get("gloss", True):
         from .gloss import gloss
-        glossed = gloss(out, tracks=out.tracks[len(board.tracks):]).as_dict()
+        # A net the brief fences keeps to its region and out of its
+        # keep-outs as it is laid again.
+        fences = {n: (e.region, e.keep_out) for n, e in brief.of.items()
+                  if e.region or e.keep_out}
+        glossed = gloss(out, tracks=out.tracks[len(board.tracks):],
+                        spacing=brief.spacing_pairs(out),
+                        barriers=brief.barrier_sides(out),
+                        areas=brief.areas, fences=fences).as_dict()
     new_tracks = out.tracks[len(board.tracks):]
     new_vias = _unique_vias(board.vias, out.vias[len(board.vias):])
     mask_note = _mask_like_board(board, out.vias[len(board.vias):])
     # Judged as written: a via on one already there is never sent, and
     # counted it is a hole drilled twice that no board will have.
     out.vias = out.vias[:len(board.vias)] + new_vias
+    # The brief is obeyed or the net is held back: copper that breaks a
+    # rule is never part of the proposal, only reported with the rule.
+    held = broken(brief, new_tracks, new_vias)
+    outside_brief = {}
+    if held:
+        for net, why in held.items():
+            outside_brief[net] = {"broken": why,
+                                  "tracks": sum(t.net == net for t in new_tracks),
+                                  "vias": sum(x.net == net for x in new_vias)}
+        new_tracks = [t for t in new_tracks if t.net not in held]
+        new_vias = [x for x in new_vias if x.net not in held]
+        out.tracks = out.tracks[:len(board.tracks)] + new_tracks
+        out.vias = out.vias[:len(board.vias)] + new_vias
     v = verdict(out)
     drc = v["report"]
     stages = finish_report(r, out)
@@ -59,7 +99,14 @@ def route_job(params: dict[str, Any]) -> dict[str, Any]:
     rep = r.report
     wanted = set(nets) if nets else None
     unrouted = {n: k for n, k in drc.unrouted.items() if wanted is None or n in wanted}
-    return {
+    # Only what this job did: the nets asked for, and vias it laid (the
+    # board's own vias in pads are the designer's, not the proposal's).
+    laid = {(round(x.x, 3), round(x.y, 3)) for x in new_vias}
+    stages["via_in_pad"] = [x for x in stages["via_in_pad"]
+                            if (round(x["x"], 3), round(x["y"], 3)) in laid]
+    if wanted is not None:
+        stages["unreached"] = [u for u in stages["unreached"] if u["net"] in wanted]
+    res = {
         "board": board.name,
         # pcb_autoroute_apply republishes this version once it is written.
         "live_version": (pub or {}).get("version"),
@@ -79,15 +126,24 @@ def route_job(params: dict[str, Any]) -> dict[str, Any]:
             "planes": sorted({f"{p.layer}:{p.net}" for p in r.pour_planes}),
             "pours": sorted({f"{r.grid.layers[p.li]}:{p.net}" for p in r.pours}),
             "released_planes": sorted(r.released),
+            # The plane it would have given to routing next, had the AI
+            # allowed it (release): connections are left unmade instead.
+            "plane_declined": r.declined,
             "old_pours": old_pours,
             "iterations": rep.iterations,
             "seconds": round(time.perf_counter() - t0, 1),
+            # The negotiation stopped at the job's time limit: what it had
+            # made is here, the rest is in unrouted.
+            "stopped_at_time_limit": bool((job_control.current() or
+                                           job_control.Control()).timed_out),
             "sharp_bends": stages["sharp_bends"],
             "unreached_pads": len(stages["unreached"]),
             "vias_in_pads": len(stages["via_in_pad"]),
             "gloss": glossed,
         },
         "unrouted": unrouted,
+        # Nets the brief rules, and those whose route broke it (held back).
+        "brief": {"nets": sorted(brief.of), "outside_brief": outside_brief},
         # What the planned stages did (see stages.py): every via in a pad,
         # each pair and bus, and every pad left unreached with its place
         # and the nets in its way.
@@ -106,8 +162,64 @@ def route_job(params: dict[str, Any]) -> dict[str, Any]:
         "vias": [{"x": v.x, "y": v.y, "size": v.diameter, "hole_size": v.hole,
                   "low_layer": v.low_layer, "high_layer": v.high_layer, "net": v.net}
                  for v in new_vias],
-        "notes": _notes(r) + _stage_notes(stages) + v["notes"] + mask_note,
+        "notes": _notes(r) + _stage_notes(stages) + v["notes"] + mask_note
+        + ([f"{len(outside_brief)} nets were routed outside their brief and held back "
+            "(brief.outside_brief names the rule each broke): change the brief or the "
+            "board and route them again."] if outside_brief else []),
     }
+    if params.get("review"):
+        res["review"] = _review(board, out, brief, res, params, stages, as_read)
+        res["findings"] = res["review"]["findings"]
+    elif brief:
+        # A whole-board route answers for what the brief rules: its
+        # measured rules and its areas, not every net's judgement calls.
+        from . import review
+        ruled = {n for n in brief.of if wanted is None or n in wanted}
+        res["findings"] = review.findings(
+            as_read, out, res["tracks"], res["vias"], brief, ruled,
+            review.net_metrics(res["tracks"], res["vias"], board.pads_by_net()),
+            outside_brief, {n: k for n, k in unrouted.items() if n in ruled}, {}, judge=False)
+    return res
+
+
+def _review(board: LayoutBoard, out: LayoutBoard, brief, res: dict, params: dict,
+            stages: dict, as_read: LayoutBoard) -> dict:
+    """What the AI looks at before accepting the round (review.py)."""
+    import time as _time
+    from pathlib import Path as _Path
+
+    from . import review
+
+    nets = list(params.get("nets") or [])
+    metrics = review.net_metrics(res["tracks"], res["vias"], board.pads_by_net())
+    advice = {}
+    # Advice routes again; a job past its time limit gives none.
+    if res["unrouted"] and params.get("advise", True) and not job_control.over_time():
+        advice = review.advise(board, out, res["unrouted"], brief, stages["unreached"],
+                               stages=params.get("stages"), round_nets=nets,
+                               seconds=float(params.get("advise_seconds", 90.0)),
+                               release=params.get("release"))
+    held = res["brief"]["outside_brief"]
+    pic = None
+    try:
+        from ...config import get_config
+        folder = _Path(get_config().workspace_dir) / "route_rounds"
+        name = f"{_Path(board.name).stem}_{_time.strftime('%Y%m%d_%H%M%S')}.png"
+        pic = review.picture(board, res["tracks"], res["vias"], nets or metrics.keys(), brief,
+                             stages["unreached"], folder / name)
+    except Exception as exc:  # noqa: BLE001 - the picture is a help, not the result
+        pic = f"no picture: {exc}"
+    found = review.findings(
+        as_read, out, res["tracks"], res["vias"], brief, nets or metrics.keys(), metrics, held,
+        res["unrouted"], advice,
+        planes={s.split(":", 1)[1] for s in res["summary"]["planes"] + res["summary"]["pours"]},
+        entries=review.pad_entries(res["tracks"], board.pads_by_net()))
+    loops = review.loop_measures(as_read, out, brief, nets or metrics.keys()) \
+        if brief.loops else []
+    return {"nets": metrics, "advice": advice, "picture": pic,
+            **({"loops": loops} if loops else {}),
+            "findings": found, "questions": [f["text"] for f in found],
+            "obeyed": sorted(n for n in brief.of if n in metrics and n not in held)}
 
 
 def _stage_notes(stages: dict) -> list[str]:
@@ -189,6 +301,16 @@ def _without_old_pours(board: LayoutBoard) -> tuple[LayoutBoard, list[str]]:
 
 def _notes(r) -> list[str]:
     notes = []
+    if r.declined:
+        d = r.declined
+        notes.append(
+            f"{d['unrouted']} connection{' is' if d['unrouted'] == 1 else 's are'} unmade "
+            f"with {d['layer']} kept as the "
+            f"{d['net']} plane. Giving that layer to routing may close them, at the cost of "
+            f"the plane: the return path of the layers next to it, and its stitching. That "
+            f"is your decision: to allow it, name {d['layer']} in the layers of the entries "
+            "that may use it (pcb_route_brief); otherwise move parts or route those "
+            "connections yourself.")
     if r.pour_planes:
         notes.append(
             "The routes rely on these inner-layer pours as planes: "

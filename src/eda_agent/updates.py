@@ -15,9 +15,10 @@ what is new and calls ``server_update(apply=True)`` only after the user says
 yes, and the MCP client's own approval prompt is a second gate. A check
 that fails is reported once too, so a missing notice means nothing new.
 
-A copy installed as a package compares its version with the one on GitHub,
-and a copy installed from git the commit pip recorded with the branch's
-head, and says how to upgrade it; it is never upgraded from here.
+A copy installed from PyPI compares its version with PyPI's latest. Any
+other package install compares its version with the one on GitHub, and one
+installed from git the commit pip recorded with the branch's head. Each is
+told how to upgrade from where it came from and is never upgraded from here.
 
 A clone with local changes, or with commits of its own, is never touched:
 the update is refused and says why. Manual checks remain available when
@@ -46,6 +47,8 @@ PYPROJECT_URL = ("https://raw.githubusercontent.com/salitronic/eda-agent/"
                  f"{BRANCH}/pyproject.toml")
 #: The head a package installed from git is compared with.
 COMMIT_URL = f"https://api.github.com/repos/salitronic/eda-agent/commits/{BRANCH}"
+#: The version a copy installed from PyPI is compared with.
+PYPI_URL = "https://pypi.org/pypi/eda-agent/json"
 
 #: How long a check is trusted before the next one reaches the network.
 CHECK_INTERVAL_S = 24 * 3600
@@ -219,6 +222,52 @@ def _installed_commit() -> str:
         return ""
 
 
+def _from_index() -> bool:
+    """Installed from a package index (PyPI). pip records direct_url.json
+    for every other install: a clone, a git+ address, a local folder or a
+    wheel file."""
+    try:
+        return metadata.distribution("eda-agent").read_text("direct_url.json") is None
+    except metadata.PackageNotFoundError:
+        return False
+
+
+def _installer() -> str:
+    """What installed this copy into an environment of its own: "pipx" or
+    "uv" (each keeps a tool in a folder named after it), else "pip"."""
+    parts = [x.lower() for x in Path(sys.prefix).parts]
+    for i, part in enumerate(parts[:-1]):
+        if part == "pipx" and parts[i + 1] == "venvs":
+            return "pipx"
+        if part == "uv" and parts[i + 1] == "tools":
+            return "uv"
+    return "pip"
+
+
+def _upgrade_how(from_index: bool) -> str:
+    """How the user upgrades this copy, with what installed it."""
+    tool = _installer()
+    if tool == "pipx":
+        return "update it with: pipx upgrade eda-agent"
+    if tool == "uv":
+        return "update it with: uv tool upgrade eda-agent"
+    if from_index:
+        return ("this copy was installed from PyPI; update it with: "
+                "python -m pip install --upgrade eda-agent")
+    return (f"this copy was installed as a package, not from a clone; update "
+            f"it with: python -m pip install --upgrade git+{REPO_URL}")
+
+
+def _pypi_version() -> str:
+    """The latest version on PyPI."""
+    with urllib.request.urlopen(PYPI_URL, timeout=15) as reply:
+        data = json.loads(reply.read(2 * 1024 * 1024).decode("utf-8", "replace"))
+    version = str((data.get("info") or {}).get("version") or "")
+    if not version:
+        raise ValueError("no version in PyPI's reply")
+    return version
+
+
 def _published_commit() -> str:
     """The head of the main branch on GitHub."""
     request = urllib.request.Request(COMMIT_URL,
@@ -267,18 +316,19 @@ def _check_package(force: bool) -> dict[str, Any]:
     if (not force and cached and cached.get("kind") == "package"
             and cached.get("installed") == installed
             and cached.get("installed_commit", "") == _installed_commit()
+            and cached.get("source") == ("pypi" if _from_index() else "github")
             and time.time() - cached.get("checked_at", 0) < CHECK_INTERVAL_S
             and not _published_moved(cached)):
         return cached
+    from_index = _from_index()
     info: dict[str, Any] = {
         "kind": "package", "installed": installed, "checked_at": time.time(),
-        "how": (f"this copy was installed as a package, not from a clone; "
-                f"update it with: python -m pip install --upgrade "
-                f"git+{REPO_URL}")}
+        "source": "pypi" if from_index else "github",
+        "how": _upgrade_how(from_index)}
     try:
-        info["latest"] = _published_version()
+        info["latest"] = _pypi_version() if from_index else _published_version()
     except (OSError, ValueError) as exc:
-        info["error"] = f"could not read {PYPROJECT_URL}: {exc}"
+        info["error"] = f"could not read {PYPI_URL if from_index else PYPROJECT_URL}: {exc}"
         info["update_available"] = None
         return info
     newer = bool(installed) and _version_key(info["latest"]) > _version_key(installed)

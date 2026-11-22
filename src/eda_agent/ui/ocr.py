@@ -30,6 +30,7 @@ authoritative signal, because that one is read exactly.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -49,6 +50,7 @@ _PW_RENDERFULLCONTENT = 0x00000002
 # PrintWindow sends work to the target UI thread and has no timeout. A
 # hung Altium command must not also hang screenshots and crash recovery.
 _CAPTURE_TIMEOUT_S = 5.0
+_LOG = logging.getLogger(__name__)
 
 #: WinRT's OCR pipeline is async, and PowerShell 5.1 cannot await an
 #: IAsyncOperation directly, hence the AsTask reflection dance. Kept as
@@ -113,7 +115,10 @@ def _capture_command(hwnd: int, path: str, enlarge: int) -> list[str]:
 
 
 def _run_capture(command: list[str], timeout: float) -> int:
-    proc = subprocess.Popen(command, stdout=subprocess.DEVNULL,
+    # stdin closed too: inherited, the worker shares the MCP server's stdio
+    # pipe, and a native module load in it can then wait on that pipe.
+    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, **no_window())
     try:
         return proc.wait(timeout=timeout)
@@ -131,9 +136,25 @@ def _run_capture(command: list[str], timeout: float) -> int:
                 child.kill()
             except psutil.NoSuchProcess:
                 pass
-        proc.kill()
-        proc.wait(timeout=1)
-        psutil.wait_procs(children, timeout=1)
+            except psutil.Error as exc:
+                _LOG.warning("capture descendant cleanup failed: %s", exc)
+        # A denied descendant must not skip root cleanup. Keep each attempt
+        # independent and preserve the original timeout for the caller.
+        try:
+            proc.kill()
+        except OSError as exc:
+            _LOG.warning("capture worker termination failed: %s", exc)
+        try:
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _LOG.warning("capture worker did not exit during cleanup: %s", exc)
+        try:
+            _, alive = psutil.wait_procs(children, timeout=1)
+            if alive:
+                _LOG.warning("capture descendants still alive after cleanup: %s",
+                             [child.pid for child in alive])
+        except psutil.Error as exc:
+            _LOG.warning("capture descendant wait failed: %s", exc)
         raise
 
 
@@ -142,8 +163,9 @@ def capture_png(hwnd: int, path: str, enlarge: int = 1, *,
     """Render a window to a PNG within ``timeout`` seconds.
 
     PrintWindow can wait forever for an unresponsive UI thread. Run it in
-    a disposable hidden process, terminating its process tree on timeout
-    with up to two seconds for exit cleanup. A thread timeout cannot release
+    a disposable hidden process, attempting to terminate its process tree on
+    timeout with up to two seconds for exit cleanup. OS-denied cleanup is
+    logged and cannot guarantee termination. A thread timeout cannot release
     a stalled PrintWindow call. Failed captures leave an
     existing destination untouched and remove their partial output.
 
@@ -195,6 +217,9 @@ def _capture_png_inline(hwnd: int, path: str, enlarge: int = 1) -> bool:
     import win32ui
     from PIL import Image
 
+    # This subprocess does not inherit the MCP process's DPI awareness.
+    # Initialize before reading rectangles so bitmap size uses physical pixels.
+    win._make_dpi_aware()
     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
     width, height = right - left, bottom - top
     if width <= 0 or height <= 0:

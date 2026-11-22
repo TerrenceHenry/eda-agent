@@ -143,3 +143,68 @@ def test_worker_arguments_success_failure_and_exceptions(monkeypatch):
 
     monkeypatch.setattr(ocr, "_capture_png_inline", error)
     assert ocr._capture_worker(["123", "out.png", "1"]) == 1
+
+
+def test_capture_launch_is_hidden_and_output_is_discarded(monkeypatch):
+    seen = {}
+
+    class Worker:
+        def wait(self, timeout):
+            assert timeout == 1.25
+            return 0
+
+    def launch(command, **kwargs):
+        seen.update(kwargs)
+        assert command == ['worker']
+        return Worker()
+
+    monkeypatch.setattr(ocr, 'no_window', lambda: {'creationflags': 0x08000000})
+    monkeypatch.setattr(ocr.subprocess, 'Popen', launch)
+    assert ocr._run_capture(['worker'], timeout=1.25) == 0
+    assert seen == {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL,
+                    'stderr': subprocess.DEVNULL, 'creationflags': 0x08000000}
+
+
+@pytest.mark.parametrize("failure", ["child_kill", "root_kill", "root_wait", "child_wait", "survivor"])
+def test_cleanup_failure_cannot_skip_root_or_replace_timeout(monkeypatch, caplog, failure):
+    from unittest.mock import Mock
+
+    original = subprocess.TimeoutExpired(["worker"], 0.1)
+    proc = Mock(pid=123)
+    proc.wait.side_effect = [original, subprocess.TimeoutExpired(["worker"], 1) if failure == "root_wait" else 0]
+    child = Mock(pid=124)
+    if failure == "child_kill":
+        child.kill.side_effect = psutil.AccessDenied(pid=124)
+    if failure == "root_kill":
+        proc.kill.side_effect = PermissionError("denied")
+    monkeypatch.setattr(ocr.subprocess, "Popen", lambda *a, **k: proc)
+    parent = Mock()
+    parent.children.return_value = [child]
+    monkeypatch.setattr(ocr.psutil, "Process", lambda pid: parent)
+    wait = Mock(return_value=([], [child]) if failure == "survivor" else ([child], []))
+    if failure == "child_wait":
+        wait.side_effect = psutil.AccessDenied(pid=124)
+    monkeypatch.setattr(ocr.psutil, "wait_procs", wait)
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        ocr._run_capture(["worker"], 0.1)
+    assert caught.value is original
+    proc.kill.assert_called_once()
+    assert proc.wait.call_count == 2
+    wait.assert_called_once_with([child], timeout=1)
+    assert caplog.records
+
+
+def test_worker_initializes_dpi_before_window_rectangle(monkeypatch):
+    from types import SimpleNamespace
+
+    seen = []
+    def rectangle(hwnd):
+        assert seen == ["dpi"]
+        seen.append("rectangle")
+        return (0, 0, 0, 0)
+    monkeypatch.setattr(ocr.win, "_make_dpi_aware", lambda: seen.append("dpi"))
+    monkeypatch.setitem(sys.modules, "win32con", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "win32gui", SimpleNamespace(GetWindowRect=rectangle))
+    monkeypatch.setitem(sys.modules, "win32ui", SimpleNamespace())
+    assert not ocr._capture_png_inline(123, "unused.png")
+    assert seen == ["dpi", "rectangle"]

@@ -4,25 +4,9 @@
 { Utils.pas - Utility functions for the Altium integration bridge                             }
 {..............................................................................}
 
-{ Capability gates must precede every reference to newer SDK identifiers.
-  DelphiScript cannot catch an undeclared identifier, even in Try/Except.
-  Keep the checks separate: custom pad shapes work on AD 25.8.1.18 (#118),
-  and separate/hole-edge mask members work on AD 25.8 (#59, #60, #61).
-  Native write/read/save/reopen tests also verified the mask members on
-  AD 21.4.1.30. This exact-build exception does not enable custom shapes
-  or infer support for other AD21 builds. }
-Function PadCustomShapeSupported(Dummy : Integer) : Boolean;
-Var
-    Ver : String;
-    Major : Integer;
-Begin
-    Ver := '';
-    Try Ver := Client.GetProductVersion; Except Ver := ''; End;
-    Major := 0;
-    If Pos('.', Ver) > 1 Then Major := StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0);
-    Result := Major >= 25;
-End;
-
+{ Separate / hole-edge mask members were verified on AD25.8 and exactly
+  AD21.4.1.30. This allowlist is independent of custom pad shape support.
+  Missing DelphiScript identifiers cannot be caught in Try/Except. }
 Function PadAdvancedMaskSupported(Dummy : Integer) : Boolean;
 Var
     Ver : String;
@@ -65,6 +49,42 @@ End;
 Function CoordToMM(Coord : TCoord) : Double;
 Begin
     Result := Coord * 25.4 / 10000000;
+End;
+
+{ Altium's version as major * 100 + minor (22.8 is 2208), 0 when it cannot  }
+{ be read.                                                                  }
+Function AltiumVersionCode(Dummy : Integer) : Integer;
+Var
+    Ver, Rest : String;
+    Major, Minor : Integer;
+Begin
+    Ver := '';
+    Try Ver := Client.GetProductVersion; Except Ver := ''; End;
+    Result := 0;
+    If Pos('.', Ver) < 2 Then Exit;
+    Major := StrToIntDef(Copy(Ver, 1, Pos('.', Ver) - 1), 0);
+    Rest := Copy(Ver, Pos('.', Ver) + 1, Length(Ver));
+    If Pos('.', Rest) > 0 Then Rest := Copy(Rest, 1, Pos('.', Rest) - 1);
+    Minor := StrToIntDef(Rest, 0);
+    Result := Major * 100 + Minor;
+End;
+
+{ Custom pad shapes arrived in Altium Designer 22.8 (release notes, August  }
+{ 2022). Before that eCustomShape is an undeclared identifier: on AD 21.4   }
+{ a pad read that reached it stopped the polling loop with an error box no  }
+{ Try catches. So the version is read first, in an If of its own.           }
+Function PadCustomShapeSupported(Dummy : Integer) : Boolean;
+Begin
+    Result := AltiumVersionCode(0) >= 2208;
+End;
+
+{ True when a pad shape is a custom shape. Every pad reader asks this, not  }
+{ eCustomShape itself: where custom shapes are missing no pad has one.      }
+Function ShapeIsCustom(S : Integer) : Boolean;
+Begin
+    Result := False;
+    If Not PadCustomShapeSupported(0) Then Exit;
+    Result := S = eCustomShape;
 End;
 
 { Lengths in the caller's unit: 'mil' (also empty, the default) or 'mm'.    }
@@ -1202,6 +1222,41 @@ Begin
     End;
     While (PPos <= PLen) And (Copy(P, PPos, 1) = '*') Do Inc(PPos);
     Result := PPos > PLen;
+End;
+
+{ FilterNumbersEqual - whether two filter values are the same NUMBER.    }
+{ A comma is read as the decimal point and spaces are ignored; both must  }
+{ be numbers (IsFloatStr, so nothing here can raise) and agree to half a  }
+{ unit in the fourth decimal (0.00005), the finest a length is printed    }
+{ in. So 9000, 9000.0, 9000,00 and 09000 are one value; abc is no number  }
+{ and equals nothing. Used by the PCB and schematic matchers for          }
+{ properties they KNOW are numbers (a length, a colour, an ordinal):      }
+{ applied to a text it would make a designator 01 equal 1.                }
+Function FilterNumbersEqual(Actual, Expected : String) : Boolean;
+Var
+    A, E, Ch : String;
+    I : Integer;
+Begin
+    Result := False;
+    A := '';
+    For I := 1 To Length(Actual) Do
+    Begin
+        Ch := Copy(Actual, I, 1);
+        If Ch = ',' Then Ch := '.';
+        A := A + Ch;
+    End;
+    E := '';
+    For I := 1 To Length(Expected) Do
+    Begin
+        Ch := Copy(Expected, I, 1);
+        If Ch = ',' Then Ch := '.';
+        E := E + Ch;
+    End;
+    A := Trim(A);
+    E := Trim(E);
+    If Not IsFloatStr(A) Then Exit;
+    If Not IsFloatStr(E) Then Exit;
+    Result := Abs(StrToFloatDef(A, 0) - StrToFloatDef(E, 0)) < 0.00005;
 End;
 
 { FilterOpHolds - whether Actual stands in relation Op to Expected. Equal }
@@ -2410,6 +2465,12 @@ End;
 Var
     _PropertyDiagStr : String;
     _DeleteFaultStr : String;
+    { Names of the parameters a delete matched and left in place because   }
+    { Altium keeps them (a sheet system parameter), joined with a pipe.     }
+    _DeleteKeptStr : String;
+    { Schematic property writes that landed since the reset, so a modify }
+    { whose every write was refused does not answer modified:true.       }
+    _SchWritesLanded : Integer;
 
 { Buffer is a String, not a TStringList. DelphiScript drops class-method  }
 { visibility on TStringList declared at module scope (Undeclared          }
@@ -2423,6 +2484,18 @@ Procedure ResetPropertyDiag(Dummy : Integer);
 Begin
     _PropertyDiagStr := '';
     _DeleteFaultStr := '';
+    _DeleteKeptStr := '';
+    _SchWritesLanded := 0;
+End;
+
+Procedure NoteSchWriteLanded(Dummy : Integer);
+Begin
+    _SchWritesLanded := _SchWritesLanded + 1;
+End;
+
+Function SchWritesLanded(Dummy : Integer) : Integer;
+Begin
+    Result := _SchWritesLanded;
 End;
 
 { Why a delete loop stopped early. The objects removed before it stopped are }
@@ -2431,6 +2504,58 @@ End;
 Procedure NoteDeleteFault(Msg : String);
 Begin
     If _DeleteFaultStr = '' Then _DeleteFaultStr := Msg;
+End;
+
+{ A parameter the delete matched and did NOT remove, because Altium keeps   }
+{ it. Recorded once per name, so a project-wide delete that meets Title on  }
+{ every sheet names it once.                                                }
+Procedure NoteDeleteKept(ParamName : String);
+Var
+    Entry : String;
+Begin
+    { A name that could not be read is still a parameter kept: say so. }
+    Entry := ParamName;
+    If Entry = '' Then Entry := '(unnamed)';
+    If Pos('|' + Entry + '|', '|' + _DeleteKeptStr + '|') > 0 Then Exit;
+    If _DeleteKeptStr = '' Then
+        _DeleteKeptStr := Entry
+    Else
+        _DeleteKeptStr := _DeleteKeptStr + '|' + Entry;
+End;
+
+{ The kept names, joined with a comma and a space, or empty. }
+Function DeleteKeptText(Dummy : Integer) : String;
+Begin
+    Result := StringReplace(_DeleteKeptStr, '|', ', ', -1);
+End;
+
+{ The kept names as a JSON array of strings. }
+Function DeleteKeptJson(Dummy : Integer) : String;
+Var
+    Remaining, Entry : String;
+    P, Count : Integer;
+Begin
+    Result := '[';
+    Count := 0;
+    Remaining := _DeleteKeptStr;
+    While Length(Remaining) > 0 Do
+    Begin
+        P := Pos('|', Remaining);
+        If P = 0 Then
+        Begin
+            Entry := Remaining;
+            Remaining := '';
+        End
+        Else
+        Begin
+            Entry := Copy(Remaining, 1, P - 1);
+            Remaining := Copy(Remaining, P + 1, Length(Remaining));
+        End;
+        If Count > 0 Then Result := Result + ',';
+        Result := Result + '"' + EscapeJsonString(Entry) + '"';
+        Inc(Count);
+    End;
+    Result := Result + ']';
 End;
 
 Procedure NotePropertyDiag(Kind : String; PropName : String);
@@ -2523,15 +2648,32 @@ End;
 { matched counts what the FILTER selected. It says nothing about whether a  }
 { property write landed, so reporting it alone made a mis-spelled or        }
 { unsupported name indistinguishable from success.                          }
+{                                                                           }
+{ A delete whose filter met parameters Altium keeps names them in          }
+{ kept_system_parameters, beside a fault if there was one, and is not a    }
+{ success: the caller asked for something that did not happen.            }
 Function ModifyOutcomeJson(Dummy : Integer): String;
 Begin
     Result := ',"properties":' + RenderPropertyDiagJson(0);
+    If _DeleteKeptStr <> '' Then
+        Result := Result + ',"kept_system_parameters":' + DeleteKeptJson(0);
     If _DeleteFaultStr <> '' Then
     Begin
         Result := Result + ',"success":false,"partial":true,"delete_error":"'
             + EscapeJsonString(_DeleteFaultStr) + '","reason":"the delete '
             + 'stopped part way. matched counts the objects already removed; '
             + 'query again before repeating it."';
+        Exit;
+    End;
+    If _DeleteKeptStr <> '' Then
+    Begin
+        Result := Result + ',"success":false,"reason":"the filter matched '
+            + 'sheet system parameters, which are not removed: Altium keeps '
+            + 'them and recreates a missing one on the next load with the '
+            + 'value *, so a removal would only lose its value. '
+            + 'kept_system_parameters names them; matched counts only the '
+            + 'parameters removed. To change or clear one, set its Text with '
+            + 'obj_modify."';
         Exit;
     End;
     If _PropertyDiagStr <> '' Then

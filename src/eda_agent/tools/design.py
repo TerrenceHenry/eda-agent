@@ -471,6 +471,9 @@ def register_design_tools(mcp) -> None:
         - ``connectivity_summary``: routed / partial / unstarted nets.
         - ``drc``: the exact clearance check.
         - ``corner_audit``: bends sharper than 45 degrees.
+        - ``track_shape_audit``: staircases (a run drawn as a chain of
+          tiny steps) and tracks shorter than their own width that are
+          no stub into a pad or via.
         - ``return_via_audit``: signal vias with no ground via within
           ``max_distance_mils``.
         - ``plane_region_audit``: pour copper broken into islands.
@@ -567,9 +570,9 @@ def register_design_tools(mcp) -> None:
         done (nothing notifies you), then `design_job_result`.
 
         Args:
-            kind: registered job kind. Currently: ``route`` (offline A*
-                router; ``params`` needs a ``geometry`` dict, optional
-                ``rules`` / ``net_classes`` / ``grid_pitch_mils``).
+            kind: registered job kind. Currently: ``route`` (route_plan as
+                a job; ``params`` needs a ``geometry`` dict, optional
+                ``rules`` / ``nets`` / ``net_classes``).
             params: keyword arguments for the engine.
 
         Returns:
@@ -591,6 +594,9 @@ def register_design_tools(mcp) -> None:
         it is done rather than ending your turn: a session that stopped to
         "check when it finishes" was never woken again.
 
+        A running job shows ``elapsed_s`` and ``progress``, the engine's
+        latest line (a router's: the round, nets routed, conflicts).
+
         Args:
             job_id: the job; blank lists every job.
             wait_seconds: hold the call until the job finishes or this
@@ -607,6 +613,24 @@ def register_design_tools(mcp) -> None:
         if wait and store.get(job_id) is not None:
             await asyncio.to_thread(store.wait, job_id, wait)
         rec = store.status(job_id)
+        return rec if rec else {"error": f"no such job: {job_id}"}
+
+    @mcp.tool()
+    async def design_job_cancel(job_id: str) -> dict[str, Any]:
+        """Cancel a background job.
+
+        One still waiting never starts. A running one stops at the
+        engine's next step (a net routed, a progress line), usually within
+        seconds: design_job_status shows ``cancel_requested`` until then,
+        and ``cancelled`` after. Nothing a cancelled job made is kept.
+        To keep what a long route has made, give it a time limit instead
+        (pcb_route_round time_limit_s).
+
+        Args:
+            job_id: the job.
+        """
+        from ..design.jobs import get_job_store
+        rec = get_job_store().cancel(job_id)
         return rec if rec else {"error": f"no such job: {job_id}"}
 
     @mcp.tool()
@@ -1688,126 +1712,6 @@ def register_design_tools(mcp) -> None:
         }
 
     @mcp.tool()
-    async def design_review_file(path: str) -> dict[str, Any]:
-        """Offline FALLBACK review of a .SchDoc/.PrjPcb: OFF by default.
-
-        Reads the file without Altium, so it checks only component-level
-        items (MPN, datasheet, placeholder values, designators, title
-        block): no netlist, no ERC. With Altium running prefer
-        ``design_lint_report``, ``proj_run_erc``, ``design_review_snapshot``
-        and the ``audit_*`` tools. Disabled unless
-        ``EDA_AGENT_HEADLESS_REVIEW=1``.
-
-        Args:
-            path: a ``.SchDoc`` sheet or a ``.PrjPcb`` project (reviews all
-                its sheets).
-
-        Returns the review report ``{file, component_count, findings,
-        summary, ...}``: or ``{"error": ...}`` if disabled or unreadable.
-        """
-        from ..fileio.review import (
-            HEADLESS_DISABLED_MESSAGE,
-            headless_review_enabled,
-            review_project_file,
-        )
-        if not headless_review_enabled():
-            return {"error": HEADLESS_DISABLED_MESSAGE, "disabled": True}
-        try:
-            return review_project_file(path)
-        except (ValueError, OSError) as e:
-            return {"error": f"cannot read {path}: {e}"}
-
-    @mcp.tool()
-    async def design_solve_netlist_file(path: str) -> dict[str, Any]:
-        """Reconstruct a .SchDoc's netlist geometrically: OFF by default.
-
-        Offline FALLBACK, same opt-in as ``design_review_file``. Parses the
-        file (no Altium, no license) and rebuilds the compiled netlist from
-        geometry (pins, wires, power ports, junctions, and by-name net
-        labels), then runs connectivity ERC (``single_pin_net`` floating
-        pins, ``net_short`` rail shorts).
-
-        Prefer the live-Altium path (``proj_get_nets`` / ``proj_run_erc``)
-        whenever a session is available: Altium's own compiler is ground
-        truth. Use this only when Altium can't be opened.
-
-        Validated envelope: wire + power port + junction + net-label
-        connectivity (live Altium 24/24; pipeline buck 7/7). It faithfully
-        reports a net the schematic left floating; cross-sheet connectors are
-        out of scope. A single sheet only (a ``.SchDoc``), not a project.
-
-        Enable with ``EDA_AGENT_HEADLESS_REVIEW=1``.
-
-        Returns ``{file, net_count, nets, pin_count, findings}``: or
-        ``{"error": ...}`` if disabled or unreadable.
-        """
-        from ..fileio.review import (
-            HEADLESS_DISABLED_MESSAGE,
-            headless_review_enabled,
-            review_connectivity,
-        )
-        if not headless_review_enabled():
-            return {"error": HEADLESS_DISABLED_MESSAGE, "disabled": True}
-        try:
-            from ..fileio.netlist_solver import solve_schematic_nets
-            solved = solve_schematic_nets(path)
-        except (ValueError, OSError, KeyError) as e:
-            return {"error": f"cannot solve {path}: {e}"}
-        return {
-            "file": str(path),
-            "net_count": len(solved["nets"]),
-            "pin_count": len(solved["pin_nets"]),
-            "nets": {name: [f"{m['component']}.{m['pin']}" for m in members]
-                     for name, members in solved["nets"].items()},
-            "findings": review_connectivity(solved),
-        }
-
-    @mcp.tool()
-    async def design_bom_file(path: str) -> dict[str, Any]:
-        """Consolidated BOM from a .SchDoc/.PrjPcb on disk: OFF by default.
-
-        Offline FALLBACK, same opt-in as ``design_review_file``. Parses the
-        Altium file directly (no Altium, no license) and groups components
-        into purchasable BOM lines, one per distinct ``(mpn, value,
-        lib_reference)``, designators grouped and naturally sorted, quantity
-        summed. A ``.PrjPcb`` aggregates all its sheets.
-
-        Prefer the live-Altium ``proj_get_bom`` / ``proj_export_bom_html``
-        when a session is available. Use this for a file on disk or a CI
-        artifact.
-
-        Enable with ``EDA_AGENT_HEADLESS_REVIEW=1``.
-
-        Returns ``{file, line_count, part_count, lines}`` where each line is
-        ``{quantity, designators, mpn, manufacturer, value, lib_reference,
-        datasheet}``: or ``{"error": ...}`` if disabled or unreadable
-        (missing file, a suffix other than .SchDoc/.PrjPcb, or a project
-        whose sheets cannot be resolved). A design read with zero parts
-        adds a ``warning``: an empty BOM is not proof of an empty design.
-        """
-        from ..fileio.review import (
-            HEADLESS_DISABLED_MESSAGE,
-            headless_review_enabled,
-        )
-        if not headless_review_enabled():
-            return {"error": HEADLESS_DISABLED_MESSAGE, "disabled": True}
-        try:
-            from ..fileio.bom import bom_from_file
-            lines = bom_from_file(path)
-        except (ValueError, OSError) as e:
-            return {"error": f"cannot read {path}: {e}"}
-        result: dict[str, Any] = {
-            "file": str(path),
-            "line_count": len(lines),
-            "part_count": sum(ln["quantity"] for ln in lines),
-            "lines": lines,
-        }
-        if not lines:
-            from ..fileio.bom import EMPTY_BOM_WARNING
-            result["warning"] = EMPTY_BOM_WARNING
-        return result
-
-    @mcp.tool()
     async def design_find_loops(
         plan_json: Union[str, dict, None] = None,
         board_json_path: str = "",
@@ -2587,7 +2491,8 @@ def register_design_tools(mcp) -> None:
         their quotes instead.
 
         Args:
-            vendor: "JLCPCB" or "PCBWay" (see design_list_fab_vendors)
+            vendor: a fab from design_list_fab_vendors ("JLCPCB",
+                "Eurocircuits", "Sierra Circuits", ...)
             copper_layers: copper layer count of the board
             outer_oz: outer copper weight, oz
             tier: the vendor's tier, "standard" by default
