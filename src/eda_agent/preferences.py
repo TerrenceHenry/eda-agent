@@ -22,8 +22,20 @@ dialogs and keystrokes (default ``on``). ``keep_in_view`` is ``on`` to fit
 the board or sheet in view after each edit (default ``off``).
 ``dialogs`` is ``manual`` to leave the dialogs tools open (the change order,
 the Teardrops options) for the user (default ``auto``: the tool answers
-them). Each also
-has an environment variable in the AI client's config; for the first two
+them). ``length_units`` is the unit a new AI session gives and reads
+lengths in, ``mil`` (the default) or ``mm``; each session may change its
+own (lengths.py). ``usage`` is ``on`` to count what each tool call costs
+in tokens (diag/usage.py; default ``off``). ``routing`` is how strictly the
+router holds the AI to its routing discipline (see :data:`ROUTING`; default
+``enforced``). ``basic_3d_models`` is ``allowed`` to let a footprint keep
+a basic 3D model, extruded boxes, cylinders or spheres with no STEP model
+among them (default ``not_allowed``: such footprints are reported, and the
+AI asks the user before replacing them; see :func:`basic_3d_models_report`).
+``altium_autorouter`` is ``allowed`` to let the AI start Altium's own
+autorouter (default ``not_allowed``: the AI routes with the router here).
+``checks_off`` names the checks switched off, comma separated
+(see :data:`CHECKS`; default none: every check runs). Each of the others
+also has an environment variable in the AI client's config; for the first two
 the stricter of the two wins, for the third either one turns it on.
 """
 
@@ -48,6 +60,11 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "ui_automation": ("on", "off"),
     "keep_in_view": ("off", "on"),
     "dialogs": ("auto", "manual"),
+    "length_units": ("mil", "mm"),
+    "usage": ("off", "on"),
+    "routing": ("enforced", "advisory", "off"),
+    "basic_3d_models": ("not_allowed", "allowed"),
+    "altium_autorouter": ("not_allowed", "allowed"),
 }
 
 DEFAULTS: dict[str, str] = {key: allowed[0] for key, allowed in CHOICES.items()}
@@ -113,7 +130,170 @@ def keep_in_view(workspace: Optional[Path] = None) -> bool:
     return preferences(workspace)["keep_in_view"] == "on"
 
 
+def usage_on(workspace: Optional[Path] = None) -> bool:
+    """True when tool calls are to be counted (the Token count switch)."""
+    return preferences(workspace)["usage"] == "on"
+
+
 def dialogs_auto(workspace: Optional[Path] = None) -> bool:
     """True when a tool answers the dialog it opens (the change order, the
     Teardrops options) itself."""
     return preferences(workspace)["dialogs"] == "auto"
+
+
+#: What each routing discipline level asks of the AI. At every level the
+#: brief the AI gave is obeyed; the levels differ in what is asked for first.
+ROUTING: dict[str, str] = {
+    "enforced": ("the router lays only nets the AI has decided in the brief (their layers "
+                 "and why), a critical net also needs the entry's source, and a round is "
+                 "applied only once every finding is answered"),
+    "advisory": ("a net the AI has not decided, or a critical net without a sourced entry, "
+                 "is routed and named, and the findings are reported but nothing waits "
+                 "for an answer"),
+    "off": ("no brief entry is asked for and nothing waits on findings; the brief "
+            "the AI gives is still obeyed"),
+}
+
+
+def routing_discipline(workspace: Optional[Path] = None) -> str:
+    """'enforced', 'advisory' or 'off', as chosen on the Config tab."""
+    return preferences(workspace)["routing"]
+
+
+def altium_autorouter_allowed(workspace: Optional[Path] = None) -> bool:
+    """True when the AI may start Altium's own autorouter (the Config tab's
+    "Altium autorouter" set to Allowed)."""
+    return preferences(workspace)["altium_autorouter"] == "allowed"
+
+
+def basic_3d_models_allowed(workspace: Optional[Path] = None) -> bool:
+    """True when a footprint may keep a basic 3D model (the Config tab's
+    "Basic 3D models" set to Allowed)."""
+    return preferences(workspace)["basic_3d_models"] == "allowed"
+
+
+#: Altium's T3DModelType of a body's model, as the scripts report it.
+STEP_MODEL_TYPE = 1
+
+
+def is_basic_3d_model(bodies: int, step_bodies: int) -> bool:
+    """A footprint's 3D model is basic when it has bodies and none of them
+    is a STEP model: extruded boxes, cylinders and spheres only."""
+    return bodies > 0 and step_bodies <= 0
+
+
+def basic_3d_models_report(names: list[str],
+                           workspace: Optional[Path] = None) -> dict[str, Any]:
+    """What a reply carries about footprints whose 3D model is basic.
+
+    Empty when there are none or the Config tab allows them. Otherwise the
+    footprints and what the AI is to do: tell the user, ask, and replace
+    only the ones the user agrees to.
+    """
+    names = sorted({n for n in names if n})
+    if not names or basic_3d_models_allowed(workspace):
+        return {}
+    return {"basic_3d_models": {
+        "footprints": names,
+        "why": ("each has only basic 3D bodies (extruded boxes, cylinders or "
+                "spheres) and no STEP model, and the Config tab of the Altium "
+                "panel does not allow basic 3D models"),
+        "ask_the_user": (
+            "Tell the user which footprints have a basic 3D model and ask "
+            "whether to replace them. Replace only the ones they agree to, "
+            "each with a STEP model built from the part's datasheet "
+            "mechanical drawing: lib_create_3d_model (replace_existing "
+            "removes the old bodies), or lib_create_footprint_from_package "
+            "for a standard package family. For parts on a board, replace "
+            "the model in the footprint's library, then bring it onto the "
+            "board with pcb_update_footprints_from_library. Never replace "
+            "a model without "
+            "asking, and never build one from guessed dimensions. A user "
+            "who wants to keep basic models sets \"Basic 3D models\" to "
+            "Allowed on the Config tab."),
+    }}
+
+
+#: The checks the Config tab can switch off, and what each one checks. Every
+#: check is on unless the user turns it off there.
+CHECKS: dict[str, str] = {
+    "footprint_drawing": "the footprint against its datasheet drawing",
+    "symbol_pins": "the symbol's pins against the datasheet pin table",
+    "pins_pads": "the symbol's pin numbers against the footprint's pads",
+    "model_body": "the 3D body against the datasheet outline",
+    "spice_model": "the SPICE model file",
+    "fab_export": "the board and parts against the fab before export",
+}
+
+
+def checks_off(workspace: Optional[Path] = None) -> set[str]:
+    """The checks switched off on the Config tab (names from CHECKS)."""
+    raw = str(_read(workspace).get("checks_off", "") or "").lower()
+    return {n.strip() for n in raw.split(",") if n.strip() in CHECKS}
+
+
+def check_on(name: str, workspace: Optional[Path] = None) -> bool:
+    """True unless check ``name`` is switched off on the Config tab."""
+    if name not in CHECKS:
+        raise KeyError(f"no check named {name!r}")
+    return name not in checks_off(workspace)
+
+
+#: Each check's row on the Config tab, as the panel labels it.
+CHECK_LABELS: dict[str, str] = {
+    "footprint_drawing": "Footprint vs drawing",
+    "symbol_pins": "Symbol vs pin table",
+    "pins_pads": "Symbol pins vs pads",
+    "model_body": "3D body vs drawing",
+    "spice_model": "SPICE model file",
+    "fab_export": "Fab export",
+}
+
+#: When a user may rightly want a part that does not pass the check.
+CHECK_REASONS: dict[str, str] = {
+    "footprint_drawing": ("lands deliberately changed from the vendor's "
+                          "pattern (longer for hand soldering, a house rule)"),
+    "symbol_pins": ("a pin table that is a picture, or names deliberately "
+                    "written another way"),
+    "pins_pads": ("a footprint held in an installed library or vault, or "
+                  "named pads deliberately left off the symbol"),
+    "model_body": ("a deliberately simplified body, or a part with no "
+                   "outline drawing"),
+    "spice_model": ("the user's own model (measured, or written in-house) "
+                    "rather than a vendor's"),
+    "fab_export": ("a limit the fab agreed for this order (a fab with no "
+                   "data here takes fab \"custom\" with the user's own limits "
+                   "instead)"),
+}
+
+
+def check_skipped(name: str) -> dict[str, str]:
+    """What a result carries when check ``name`` was switched off, so a part
+    built without it is never taken for a checked one."""
+    return {"check": name, "skipped": (
+        f"not checked: {CHECKS[name]} is switched off on the Config tab")}
+
+
+def if_the_user_insists(name: str) -> str:
+    """What a refusal by check ``name`` tells the agent to do when the
+    user wants to go ahead anyway."""
+    return (f"Show the user what differs. If they still want it built as it "
+            f"is, ask them to switch \"{CHECK_LABELS[name]}\" off on the Config "
+            f"tab of the Altium panel, then build it again and switch it back "
+            f"on after. Never work around the check another way: not another "
+            f"tool, not an edit after the build. See docs/CONFIG.md.")
+
+
+def checks_guide() -> str:
+    """Every check, what it checks, when a user may want to go ahead, and
+    the switch: the text tool_guide and docs/CONFIG.md give."""
+    rows = "; ".join(
+        f"\"{CHECK_LABELS[n]}\" checks {CHECKS[n]} (a user may want past it "
+        f"for {CHECK_REASONS[n]})" for n in CHECKS)
+    return ("A refused build is the check working: report what differs and "
+            "let the user decide. Only the user switches a check off, on the "
+            "Config tab of the Altium panel; it takes effect on the next "
+            "command, and every result built with it off carries "
+            "\"unchecked\". Never pass a check by another route (a different "
+            "tool, pads or pins placed one by one, an edit after the build). "
+            f"The checks: {rows}.")

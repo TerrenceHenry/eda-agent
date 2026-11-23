@@ -12,7 +12,8 @@ MEMBER = re.compile(r"\.(SolderMaskBottomExpansion|UseSeparateExpansions|SolderM
 INVENTORY = {
     "Library.pas": {"Lib_SetViaProperties": (11, 12), "MaskBottomMM": (1, 1),
         "MaskSeparate": (1, 1), "Lib_GetPadGeometry": (3, 3),
-        "Lib_SetPadProperties": (7, 8), "LibViaDetailJson": (1, 1)},
+        "ApplyPadEdit": (6, 1), "PadEditJson": (1, 1),
+        "ApplyViaMaskOp": (8, 1), "LibViaDetailJson": (1, 1)},
     "PCBGeneric.pas": {"PCBGetMask": (3, 1), "PCBSetMask": (3, 1)},
     "PCB.pas": {"PCB_GetPadProperties": (2, 2),
         "PCB_SetViaSoldermaskRelief": (4, 1), "LmMaskJson": (3, 2)},
@@ -50,15 +51,29 @@ def test_removing_each_version_gate_is_detected(filename):
             covered += 1
     assert covered == sum(count for _, count in INVENTORY[filename].values())
 
-@pytest.mark.parametrize("name", ["Lib_SetViaProperties", "Lib_SetPadProperties"])
-def test_library_rejects_explicit_advanced_requests_before_mutation(name):
+@pytest.mark.parametrize("name, field", [
+    ("Lib_SetViaProperties", "ExtractJsonValue(Params,"),
+    ("Lib_AddFootprintVias", "GetBatchField(Op,"),
+    ("PadEditProblem", "PadArg(Src, IsOp,"),
+])
+def test_library_preflight_rejects_explicit_advanced_requests(name, field):
     body = functions(source("Library.pas"))[name]
-    pre = body[:body.index("PcbBeginEdit(0)")]
-    assert "If Not PadAdvancedMaskSupported(0) Then" in pre
+    pre = body.split("PcbBeginEdit(0)", 1)[0]
+    pre = pre[pre.index("If Not PadAdvancedMaskSupported(0) Then"):]
     assert "'UNSUPPORTED_VERSION'" in pre
     for key in ("mask_bottom_expansion", "mask_separate", "mask_from_hole_edge"):
-        assert "ExtractJsonValue(Params, '" + key + "') <> ''" in pre
+        assert field + " '" + key + "') <> ''" in pre
     assert pre.index("'UNSUPPORTED_VERSION'") < pre.index("Exit;")
+
+
+@pytest.mark.parametrize("name", ["Lib_SetPadProperties", "Lib_SetPadGeometry"])
+def test_both_pad_entry_points_preflight_before_writing(name):
+    body = functions(source("Library.pas"))[name]
+    preflight = body.index("PadEditProblem(")
+    mutation = body.index("PcbBeginEdit(0)")
+    assert preflight < mutation
+    assert "BuildErrorResponse(RequestId, Code," in body[preflight:mutation]
+    assert "Exit;" in body[preflight:mutation]
 
 
 def test_generic_rejects_mixed_set_before_walk():
@@ -77,9 +92,9 @@ def test_legacy_top_values_remain_available_and_unknown_reads_are_null():
     for name in ("MaskBottomMM", "MaskSeparate"):
         assert "Result := 'null';" in bodies[name]
         assert "If Not PadAdvancedMaskSupported(0) Then Exit;" in bodies[name]
-    for name in ("Lib_SetViaProperties", "Lib_SetPadProperties"):
+    for name in ("Lib_SetViaProperties", "PadEditProblem"):
         pre = bodies[name].split("'UNSUPPORTED_VERSION'", 1)[0]
-        assert "ExtractJsonValue(Params, 'mask_expansion')" not in pre
+        assert "'mask_expansion'" not in pre
     for name in ("PCBGetMask", "PCBSetMask"):
         body = functions(source("PCBGeneric.pas"))[name]
         assert "PropName = 'SolderMaskExpansion'" not in body[:body.index("Exit;")]

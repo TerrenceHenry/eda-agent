@@ -40,7 +40,9 @@ def _routine(code: str, name: str) -> str:
 _STUBS = """
 const PREFS_FILE = 'preferences.json';
 var ValueFormat, ValueUnit, EditsMode, DeletingMode, ClosingMode,
-    UiAutomationMode, KeepInViewMode, DialogMode, WorkspaceDir : String;
+    UiAutomationMode, KeepInViewMode, LengthUnits, DialogMode, UsageMode, RoutingMode,
+    Basic3dMode, AutorouterMode, ChecksOff,
+    WorkspaceDir : String;
 
 function ExtractJsonValue(Json, Key : String) : String;
 var P, Q : Integer;
@@ -132,7 +134,9 @@ def test_python_reads_the_same_file(tmp_path):
     assert preferences.preferences(tmp_path) == {
         "value_format": "none", "value_unit": "without", "edits": "allowed",
         "deleting": "allowed", "closing": "allowed",
-        "ui_automation": "on", "keep_in_view": "off", "dialogs": "auto"}
+        "ui_automation": "on", "keep_in_view": "off", "dialogs": "auto",
+        "length_units": "mil", "usage": "off", "routing": "enforced",
+        "basic_3d_models": "not_allowed", "altium_autorouter": "not_allowed"}
     for stored, seen in (('{"value_format":"si","value_unit":"with"}', "with"),
                          ('{"value_format":"si","value_unit":"WITH"}', "with"),
                          ('{"value_format":"si","value_unit":"yes"}', "without"),
@@ -152,9 +156,15 @@ def test_the_config_tab_is_wired_and_painted_at_start():
                     "opt_FmtSiUnitClick", "opt_EditsAllowedClick",
                     "opt_EditsReadOnlyClick", "opt_AutoOnClick", "opt_AutoOffClick",
                     "opt_ViewOffClick", "opt_ViewOnClick",
+                    "opt_UnitsMilClick", "opt_UnitsMmClick",
                     "opt_DeleteAllowedClick", "opt_DeleteRefusedClick",
                     "opt_CloseAllowedClick", "opt_CloseRefusedClick",
-                    "opt_EcoAutoClick", "opt_EcoManualClick"):
+                    "opt_EcoAutoClick", "opt_EcoManualClick",
+                    "opt_UsageOffClick", "opt_UsageOnClick",
+                    "opt_RouteEnforcedClick", "opt_RouteAdvisoryClick",
+                    "opt_RouteOffClick", "opt_Basic3dNotAllowedClick",
+                    "opt_Basic3dAllowedClick", "opt_AutorouterNotAllowedClick",
+                    "opt_AutorouterAllowedClick"):
         assert f"= {handler}" in dfm, handler
         assert handler in form, handler
     for option, call in (("None", "'none', 'without'"), ("Rkm", "'rkm', 'without'"),
@@ -169,12 +179,23 @@ def test_the_config_tab_is_wired_and_painted_at_start():
                          ("AutoOff", "'ui_automation', 'off'"),
                          ("ViewOff", "'keep_in_view', 'off'"),
                          ("ViewOn", "'keep_in_view', 'on'"),
+                         ("UnitsMil", "'length_units', 'mil'"),
+                         ("UnitsMm", "'length_units', 'mm'"),
                          ("DeleteAllowed", "'deleting', 'allowed'"),
                          ("DeleteRefused", "'deleting', 'refused'"),
                          ("CloseAllowed", "'closing', 'allowed'"),
                          ("CloseRefused", "'closing', 'refused'"),
                          ("EcoAuto", "'dialogs', 'auto'"),
-                         ("EcoManual", "'dialogs', 'manual'")):
+                         ("EcoManual", "'dialogs', 'manual'"),
+                         ("UsageOff", "'usage', 'off'"),
+                         ("UsageOn", "'usage', 'on'"),
+                         ("RouteEnforced", "'routing', 'enforced'"),
+                         ("RouteAdvisory", "'routing', 'advisory'"),
+                         ("RouteOff", "'routing', 'off'"),
+                         ("Basic3dNotAllowed", "'basic_3d_models', 'not_allowed'"),
+                         ("Basic3dAllowed", "'basic_3d_models', 'allowed'"),
+                         ("AutorouterNotAllowed", "'altium_autorouter', 'not_allowed'"),
+                         ("AutorouterAllowed", "'altium_autorouter', 'allowed'")):
         assert f"ChooseAgentSetting({call})" in form[f"opt_{option}Click"]
     assert "StorePreferences(0)" in form["ChooseAgentSetting"]
     # Loaded before the form is shown, so the first paint is the stored choice.
@@ -355,3 +376,204 @@ def test_python_refuses_deletes_and_closes_when_the_panel_says_so(monkeypatch, t
     assert safety.refuse_command("pcb.embedded_data", {"action": "write"}) is None
     assert "closing documents" in safety.refuse_command("application.close_document")
     assert safety.refuse_command("pcb.place_tracks") is None
+
+
+_CHECK_STUBS = """
+type TLog = record Lines : TStringList; end;
+var mmo_Log : TLog;
+procedure PaintAgentSettings(Dummy : Integer); begin end;
+"""
+
+
+def test_every_check_is_on_until_the_panel_turns_it_off(tmp_path):
+    assert preferences.checks_off(tmp_path) == set()
+    assert all(preferences.check_on(n, tmp_path) for n in preferences.CHECKS)
+    with pytest.raises(KeyError):
+        preferences.check_on("no_such_check", tmp_path)
+    (tmp_path / "preferences.json").write_text(
+        '{"checks_off":"spice_model, footprint_drawing,bogus"}')
+    assert preferences.checks_off(tmp_path) == {"spice_model", "footprint_drawing"}
+    assert not preferences.check_on("footprint_drawing", tmp_path)
+    assert preferences.check_on("pins_pads", tmp_path)
+    note = preferences.check_skipped("footprint_drawing")
+    assert note["check"] == "footprint_drawing" and "switched off" in note["skipped"]
+
+
+def test_the_panel_turns_checks_off_and_on_and_keeps_them(tmp_path):
+    fpc = shutil.which("fpc")
+    if not fpc:
+        pytest.skip("Free Pascal Compiler (fpc) is not installed or not on PATH")
+    global _STUBS
+    saved = _STUBS
+    _STUBS = saved + _CHECK_STUBS
+    try:
+        out = _run(tmp_path, [
+            "  mmo_Log.Lines := TStringList.Create;",
+            "  LoadPreferences(0); WriteLn('[', ChecksOff, ']');",
+            "  ChooseCheck('spice_model', False); ChooseCheck('fab_export', False);",
+            "  ChooseCheck('spice_model', False);",
+            "  WriteLn(ChecksOff, ' ', CheckIsOff('spice_model'), ' ', CheckIsOff('model_body'));",
+            "  ChecksOff := ''; LoadPreferences(0); WriteLn(ChecksOff);",
+            "  ChooseCheck('spice_model', True); WriteLn(ChecksOff);",
+            "  ChooseCheck('fab_export', True); WriteLn('[', ChecksOff, ']');",
+        ], extra=("CheckIsOff", "ChooseCheck"))
+    finally:
+        _STUBS = saved
+    assert out == ["[]", "fab_export,spice_model TRUE FALSE",
+                   "fab_export,spice_model", "fab_export", "[]"]
+
+
+def test_the_check_switches_are_wired_on_the_config_tab():
+    dfm = (SCRIPTS / "StatusForm.dfm").read_text(encoding="ascii")
+    form = functions(strip_comments(_code("StatusForm.pas")))
+    painted = form["PaintChecks"]
+    names = {"Fp": "footprint_drawing", "Sym": "symbol_pins", "Pad": "pins_pads",
+             "Body": "model_body", "Spice": "spice_model", "Fab": "fab_export"}
+    assert set(names.values()) == set(preferences.CHECKS)
+    for suffix, name in names.items():
+        for state, turn_on in (("On", "True"), ("Off", "False")):
+            handler = f"opt_Chk{suffix}{state}Click"
+            assert f"= {handler}" in dfm, handler
+            assert f"ChooseCheck('{name}', {turn_on})" in form[handler], handler
+            assert f"opt_Chk{suffix}{state}" in painted, handler
+    assert "StorePreferences(0)" in form["ChooseCheck"]
+    assert "PaintChecks(0)" in form["PaintAgentSettings"]
+    assert "lbl_CfgChecksHint" in painted
+
+
+def test_config_md_the_panel_and_the_server_name_the_same_checks():
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "CONFIG.md").read_text(
+        encoding="utf-8")
+    dfm = (SCRIPTS / "StatusForm.dfm").read_text(encoding="ascii")
+    assert set(preferences.CHECK_LABELS) == set(preferences.CHECKS) == set(
+        preferences.CHECK_REASONS)
+    for name, label in preferences.CHECK_LABELS.items():
+        row = f"| {label} | {preferences.CHECKS[name]} | {preferences.CHECK_REASONS[name]} |"
+        assert row in doc, name
+        assert f"Caption = '{label}'" in dfm, label
+        hint = preferences.if_the_user_insists(name)
+        assert f'"{label}" off on the Config' in hint and "CONFIG.md" in hint
+        assert label in preferences.checks_guide()
+
+
+def test_tool_guide_answers_a_user_who_insists():
+    from eda_agent.tools import guidance
+    recipe = next(r for r in guidance._RECIPES if "go ahead anyway" in r["task"])
+    assert recipe["note"] == preferences.checks_guide()
+    assert "lib_set_pad_properties" in [name for name, _ in recipe["avoid"]]
+
+
+def test_the_length_unit_is_kept_and_defaults_to_mils(tmp_path):
+    out = _run(tmp_path, [
+        "  LoadPreferences(0); WriteLn(LengthUnits);",
+        "  LengthUnits := 'mm'; StorePreferences(0);",
+        "  LengthUnits := ''; LoadPreferences(0); WriteLn(LengthUnits);",
+    ])
+    assert out == ["mil", "mm"]
+    # The file the panel writes is the one the Python side reads.
+    assert preferences.preferences(tmp_path)["length_units"] == "mm"
+
+
+def test_the_token_count_is_kept_and_defaults_to_off(tmp_path):
+    out = _run(tmp_path, [
+        "  LoadPreferences(0); WriteLn(UsageMode);",
+        "  UsageMode := 'on'; StorePreferences(0);",
+        "  UsageMode := ''; LoadPreferences(0); WriteLn(UsageMode);",
+    ])
+    assert out == ["off", "on"]
+    assert preferences.usage_on(tmp_path)
+    painted = functions(strip_comments(_code("StatusForm.pas")))["PaintAgentSettings"]
+    assert "opt_UsageOn" in painted and "lbl_CfgUsageHint" in painted
+
+
+def test_the_routing_discipline_is_kept_and_defaults_to_enforced(tmp_path):
+    out = _run(tmp_path, [
+        "  LoadPreferences(0); WriteLn(RoutingMode);",
+        "  RoutingMode := 'advisory'; StorePreferences(0);",
+        "  RoutingMode := ''; LoadPreferences(0); WriteLn(RoutingMode);",
+        "  RoutingMode := 'off'; StorePreferences(0);",
+        "  RoutingMode := ''; LoadPreferences(0); WriteLn(RoutingMode);",
+    ])
+    assert out == ["enforced", "advisory", "off"]
+    assert preferences.routing_discipline(tmp_path) == "off"
+    (tmp_path / "preferences.json").write_text('{"routing":"lax"}')
+    assert preferences.routing_discipline(tmp_path) == "enforced"
+    assert _run(tmp_path, ["  LoadPreferences(0); WriteLn(RoutingMode);"]) == ["enforced"]
+    painted = functions(strip_comments(_code("StatusForm.pas")))["PaintAgentSettings"]
+    for name in ("opt_RouteEnforced", "opt_RouteAdvisory", "opt_RouteOff",
+                 "lbl_CfgRoutingHint"):
+        assert name in painted, name
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "CONFIG.md").read_text(
+        encoding="utf-8")
+    assert "| Routing discipline | Enforced / Advisory / Off |" in doc
+    assert set(preferences.ROUTING) == set(preferences.CHOICES["routing"])
+
+
+def test_basic_3d_models_are_kept_and_default_to_not_allowed(tmp_path):
+    out = _run(tmp_path, [
+        "  LoadPreferences(0); WriteLn(Basic3dMode);",
+        "  Basic3dMode := 'allowed'; StorePreferences(0);",
+        "  Basic3dMode := ''; LoadPreferences(0); WriteLn(Basic3dMode);",
+        "  Basic3dMode := 'not_allowed'; StorePreferences(0);",
+        "  Basic3dMode := ''; LoadPreferences(0); WriteLn(Basic3dMode);",
+    ])
+    assert out == ["not_allowed", "allowed", "not_allowed"]
+    assert not preferences.basic_3d_models_allowed(tmp_path)
+    (tmp_path / "preferences.json").write_text('{"basic_3d_models":"allowed"}')
+    assert preferences.basic_3d_models_allowed(tmp_path)
+    (tmp_path / "preferences.json").write_text('{"basic_3d_models":"maybe"}')
+    assert not preferences.basic_3d_models_allowed(tmp_path)
+    painted = functions(strip_comments(_code("StatusForm.pas")))["PaintAgentSettings"]
+    for name in ("opt_Basic3dNotAllowed", "opt_Basic3dAllowed", "lbl_CfgBasic3dHint"):
+        assert name in painted, name
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "CONFIG.md").read_text(
+        encoding="utf-8")
+    assert "| Basic 3D models | Not allowed / Allowed |" in doc
+
+
+def test_altiums_autorouter_is_kept_and_defaults_to_not_allowed(tmp_path):
+    out = _run(tmp_path, [
+        "  LoadPreferences(0); WriteLn(AutorouterMode);",
+        "  AutorouterMode := 'allowed'; StorePreferences(0);",
+        "  AutorouterMode := ''; LoadPreferences(0); WriteLn(AutorouterMode);",
+    ])
+    assert out == ["not_allowed", "allowed"]
+    assert preferences.altium_autorouter_allowed(tmp_path)
+    (tmp_path / "preferences.json").write_text('{"altium_autorouter":"maybe"}')
+    assert not preferences.altium_autorouter_allowed(tmp_path)
+    painted = functions(strip_comments(_code("StatusForm.pas")))["PaintAgentSettings"]
+    for name in ("opt_AutorouterNotAllowed", "opt_AutorouterAllowed",
+                 "lbl_CfgAutorouterHint"):
+        assert name in painted, name
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "CONFIG.md").read_text(
+        encoding="utf-8")
+    assert "| Altium autorouter | Not allowed / Allowed |" in doc
+
+
+def test_altiums_autorouter_is_refused_until_the_user_allows_it(monkeypatch):
+    from eda_agent import safety
+
+    monkeypatch.setattr(preferences, "altium_autorouter_allowed", lambda *a: False)
+    for name in ("PCB:AutoRoute", " pcb:autoroute "):
+        reason = safety.refuse_altium_autorouter(name)
+        assert "Config tab" in reason and "pcb_route_round" in reason
+    assert safety.refuse_altium_autorouter("PCB:Zoom") is None
+    monkeypatch.setattr(preferences, "altium_autorouter_allowed", lambda *a: True)
+    assert safety.refuse_altium_autorouter("PCB:AutoRoute") is None
+
+
+def test_a_footprint_is_basic_only_without_a_step_body():
+    assert preferences.is_basic_3d_model(bodies=2, step_bodies=0)
+    assert not preferences.is_basic_3d_model(bodies=2, step_bodies=1)
+    assert not preferences.is_basic_3d_model(bodies=0, step_bodies=0)
+
+
+def test_basic_models_are_reported_with_what_to_ask(tmp_path):
+    report = preferences.basic_3d_models_report(["SOT23", "", "QFN16", "SOT23"],
+                                                tmp_path)
+    flag = report["basic_3d_models"]
+    assert flag["footprints"] == ["QFN16", "SOT23"]
+    assert "ask" in flag["ask_the_user"] and "lib_create_3d_model" in flag["ask_the_user"]
+    assert preferences.basic_3d_models_report([], tmp_path) == {}
+    (tmp_path / "preferences.json").write_text('{"basic_3d_models":"allowed"}')
+    assert preferences.basic_3d_models_report(["SOT23"], tmp_path) == {}

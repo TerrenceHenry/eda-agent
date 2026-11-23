@@ -111,10 +111,13 @@ COVERED: dict[str, str] = {
     "pcb_place_region": "kicad_place_shapes",
     "pcb_place_ring": "kicad_place_shapes",
     "pcb_place_polygon_rect": "kicad_place_zones",
+    "pcb_place_polygon": "kicad_place_zones",
     "pcb_place_polygon_board": "kicad_place_zones",
     "pcb_start_polygon_placement": "kicad_place_zones",
     "pcb_keepout_board_outline": "kicad_place_zones",
-    "pcb_dimension": "kicad_place_dimensions",
+    "pcb_create_dimension": "kicad_place_dimensions",
+    "pcb_get_dimensions": "kicad_query_items",
+    "pcb_edit_dimension": "kicad_modify_items",
     "pcb_set_board_shape": "kicad_set_board_outline",
     "pcb_auto_size_board_outline": "kicad_set_board_outline",
     "pcb_copy_tracks_radial": "kicad_copy_items",
@@ -167,6 +170,7 @@ COVERED: dict[str, str] = {
     "pcb_special_strings": "kicad_get_text_variables",
     "pcb_render_svg": "kicad_export_pcb",
     "pcb_render_png": "kicad_render_3d",
+    "pcb_render_3d": "kicad_render_3d",
     "pcb_export_coordinates": "kicad_export_pos",
     "pcb_export_component_3d": "kicad_export_step",
     "pcb_gerber_options": "kicad_export_gerbers",
@@ -224,7 +228,9 @@ COVERED: dict[str, str] = {
     "sch_increment_designators": "kicad_sch_annotate",
     "sch_set_sheet_size": "kicad_sch_set_page",
     "sch_set_sheet_options": "kicad_sch_set_page",
+    "sch_sheet_template": "kicad_sch_set_page",
     "sch_get_sheet_parameters": "kicad_sch_get_items",
+    "sch_sheet_parameters": "kicad_set_title_block",
     "sch_render_svg": "kicad_export_schematic_svg",
     # libraries
     "lib_get_installed_libraries": "kicad_lib_list_libraries",
@@ -291,6 +297,8 @@ COVERED: dict[str, str] = {
 }
 
 NOT_APPLICABLE: dict[str, str] = {
+    # A KiCad dimension's ends are plain points: nothing binds them.
+    "pcb_dimension_bindings": "Altium binds a dimension's ends to pads and arcs; KiCad does not",
     # Altium 365
     **{name: _A365 for name in (
         "altium365_check_setup", "altium365_describe_type", "altium365_get_component",
@@ -332,6 +340,7 @@ NOT_APPLICABLE: dict[str, str] = {
     "app_get_clipboard": "Altium clipboard contents",
     "app_create_document": "Altium creates documents in an open project; KiCad's API cannot",
     "app_close_document": _NO_API,
+    "app_close_opened_documents": _NO_API,
     "app_set_active_document": _NO_API,
     "app_update_from_libraries": "Altium's update-from-libraries dialog",
     "obj_refresh_document": "KiCad redraws after every API change",
@@ -339,6 +348,8 @@ NOT_APPLICABLE: dict[str, str] = {
     "proj_net_color": "per-net colours have no call in KiCad 10.0's API",
     "lib_export_kicad_footprint": "converts Altium footprints to KiCad files",
     "lib_export_kicad_symbol": "converts Altium symbols to KiCad files",
+    "proj_convert_to_kicad": "exports a KiCad copy of an Altium project",
+    "proj_import_from_kicad": "rebuilds a KiCad project in Altium",
     "lib_save_footprint_library": "library tools here write the file on each call",
     "obj_get_font_id": "Altium's font table",
     "obj_get_font_spec": "Altium's font table",
@@ -349,7 +360,7 @@ NOT_APPLICABLE: dict[str, str] = {
     "sch_set_units": "Altium document units; KiCad files are mm",
     # project bookkeeping
     **{name: _ALT_DOC for name in (
-        "proj_add_document", "proj_remove_document", "proj_import_document",
+        "proj_add_document", "proj_remove_document", "proj_rename_document", "proj_import_document",
         "proj_load_sheets", "proj_close", "proj_open", "proj_save",
         "proj_get_compile_freshness", "proj_get_declared_design_objects",
         "proj_get_channels", "proj_get_hierarchy", "proj_push_parameters",
@@ -362,6 +373,7 @@ NOT_APPLICABLE: dict[str, str] = {
     "proj_lock_designator": "Altium designator lock",
     "proj_replace_component": _NO_API,
     "proj_delete_sheet": "Altium sheet removal from a project",
+    "proj_remove_parameter": "kicad_set_text_variable sets a variable; KiCad's API has no remove",
     # variants
     **{name: _VARIANT for name in (
         "proj_create_variant", "proj_copy_variant", "proj_delete_variant",
@@ -391,6 +403,7 @@ NOT_APPLICABLE: dict[str, str] = {
     "pcb_create_room": "Altium rooms; KiCad uses rule areas (kicad_place_zones)",
     "app_document_owners": "sessions sharing one running Altium; KiCad boards are files each session opens itself",
     "app_claim_document": "sessions sharing one running Altium; KiCad boards are files each session opens itself",
+    "app_release_document": "sessions sharing one running Altium; KiCad boards are files each session opens itself",
     "pcb_get_room_rules": "Altium rooms",
     "pcb_get_impedance_profiles": "Altium impedance profiles",
     "pcb_impedance_profile": "Altium impedance profiles",
@@ -423,6 +436,10 @@ NOT_APPLICABLE: dict[str, str] = {
     "pcb_tune_length": "length tuning is interactive in KiCad; no API call",
     "pcb_autoroute": "KiCad has no built-in autorouter",
     "pcb_autoroute_apply": "KiCad has no built-in autorouter",
+    "pcb_route_brief": "the brief rules the in-house router, which reads Altium boards",
+    "pcb_route_round": "the in-house router reads Altium boards; KiCad has no autorouter",
+    "pcb_route_simulate": "simulates the in-house router's findings on an Altium board's copper",
+    "pcb_route_review": "measures an Altium board's copper against the in-house router's brief",
     "pcb_add_teardrops": "teardrops are set in KiCad's dialog; no API call",
     "pcb_remove_teardrops": "teardrops are set in KiCad's dialog; no API call",
     "pcb_set_dielectric": _STACKUP_RO,
@@ -439,6 +456,7 @@ NOT_APPLICABLE: dict[str, str] = {
     "pcb_body": "Altium 3D bodies; KiCad footprints link model files",
     "pcb_hole_symbols": "Altium drill symbols",
     "sch_get_harness": "Altium harness wiring diagrams; KiCad has no harness documents",
+    "sch_get_active_net": "reads Altium's compiled netlist by the selected object's handle",
     "sch_place_harness_connectors": "Altium harness wiring diagrams; KiCad has no harness documents",
     "sch_place_harness_wires": "Altium harness wiring diagrams; KiCad has no harness documents",
     "pcb_net_figures": "Altium net figures",
@@ -452,11 +470,13 @@ NOT_APPLICABLE: dict[str, str] = {
     "pcb_make_paste_grid": "free pads: KiCad 10.0's API creates pads only inside footprints",
     # Altium-only schematic objects
     "sch_place_harness_connector": "Altium signal harnesses",
+    "sch_place_signal_harness": "Altium signal harnesses",
     "sch_get_constraint_groups": "Altium constraint groups",
     "sch_add_directive": "Altium schematic directives; KiCad uses net classes and rules",
     "sch_get_directives": "Altium schematic directives",
     "sch_place_blanket": "Altium blankets carry directives; KiCad has no blanket object",
     "sch_get_blankets": "Altium blankets carry directives; KiCad has no blanket object",
+    "sch_set_draw_order": "KiCad's schematic API has no draw-order call",
     "sch_place_compile_mask": "Altium compile masks; KiCad has no compile-mask object",
     "sch_set_net_tie": "net ties are a footprint property in KiCad",
     "sch_set_component_unique_id": "KiCad symbol uuids are fixed identities",
@@ -468,6 +488,7 @@ NOT_APPLICABLE: dict[str, str] = {
     "sch_preview_template": "Altium sheet templates engine",
     # Altium-only library features
     "lib_set_current_component": "Altium editor focus",
+    "lib_set_current_footprint": "Altium editor focus",
     "lib_reload_library": "Altium library reload",
     "lib_clear_source_library": "Altium source-library links",
     "lib_set_symbol_aliases": "KiCad derived symbols replace aliases",
@@ -491,6 +512,7 @@ NOT_APPLICABLE: dict[str, str] = {
     "design_job_start": "Altium background jobs",
     "design_job_status": "Altium background jobs",
     "design_job_result": "Altium background jobs",
+    "design_job_cancel": "Altium background jobs",
     "design_read_rules_export": "reads Altium's rules export",
     "design_snapshot_inventory": "inventories Altium documents",
     "design_plan_from_sheet": "reads an Altium sheet into a plan",

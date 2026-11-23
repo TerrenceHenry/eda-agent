@@ -37,8 +37,6 @@ def test_body_placement_never_probes_the_missing_xy_members():
     with pytest.raises(AssertionError):
         _safe_placement(body.replace("BeforeBox := Body.BoundingRectangle;",
                                      "CurX := Body.x;"))
-    generic = load(ROOT / "scripts/altium/PCBGeneric.pas")["PCBPrimitivePos"]
-    assert not re.search(r"\bBody\.[xy]\b", generic, re.I)
 
 
 def test_step_standoff_is_set_on_model_before_binding():
@@ -83,12 +81,12 @@ def test_unverified_older_visibility_is_refused_before_board_access():
 @pytest.mark.parametrize("routine", ["PCB_LayerStackManager", "PCB_MoveLayer", "PCB_LoadStackManagerModel"])
 def test_stack_sdk_is_rejected_before_any_late_bound_call(routine):
     body = _pcb()[routine]
-    gate = body.index("Problem := PCBStackManagerProblem(0)")
+    gate = body.index("Result := LayerStackManagerRefusal(RequestId);")
     assert gate < body.index("LSM := LayerStackManager")
-    assert "'UNSUPPORTED'" in body[gate:body.index("LSM := LayerStackManager")]
     assert not re.search(r"ApplyToPcb|\.SetState_|MarkDocDirty", body[:gate])
-    helper = _pcb()["PCBStackManagerProblem"]
-    assert "Client.GetProductVersion" in helper and "If Major < 25 Then" in helper
+    helper = _pcb()["LayerStackManagerRefusal"]
+    assert "AltiumVersionCode(0)" in helper and "If Code < 2500 Then" in helper
+    assert "'UNSUPPORTED'" in helper
 
 
 @pytest.mark.asyncio

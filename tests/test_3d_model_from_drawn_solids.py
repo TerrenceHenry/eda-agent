@@ -76,14 +76,15 @@ def test_the_tool_writes_beside_the_library_and_links(monkeypatch, tmp_path):
                 return {"file_path": str(tmp_path / "Parts.PcbLib")}
             return {"success": True}
 
-    def _write(plan, path, name="part"):
+    def _write(plan, path, name="part", review=None):
         return {"ok": True, "path": str(path), "writer": "fake"}
 
     monkeypatch.setattr(lib_tools, "get_bridge", lambda: _Bridge())
     monkeypatch.setattr(models3d, "write_step", _write)
     lib_tools.register_library_tools(_Mcp())
     out = asyncio.run(tools["lib_create_3d_model"](
-        "USB_C", [_SHELL], "HRO drawing p.1"))
+        "USB_C", [_SHELL], "HRO drawing p.1",
+        drawing={"body_x": 8.94, "body_y": 7.35, "height": [3.16, 3.26]}))
     assert out["ok"] is True
     assert Path(out["path"]) == tmp_path / "3D" / "USB_C.step"
     link = [p for c, p in sent if c == "library.link_3d_model"]

@@ -332,6 +332,13 @@ def _close_dir_watcher(handle) -> None:
         pass
 
 
+#: Set by Claude Code in every process it starts; one per Claude process.
+CLAUDE_SOCKET_ENV = "CLAUDE_CODE_MESSAGING_SOCKET"
+
+#: The session's tag, set here for the processes this one starts.
+SESSION_ENV = "EDA_AGENT_SESSION"
+
+
 def _claude_session_tag() -> str:
     """Eight hex digits naming the Claude session this server runs under.
 
@@ -339,15 +346,53 @@ def _claude_session_tag() -> str:
     the two-tool surface), and the reload proxy restarts its child, so a
     random tag per process gave one session several. Altium then refused
     a session's own write as another session's (measured 2026-11-05: a
-    repour through one server, the DRC after it through the other). The
-    tag is made from the nearest Claude process above this one, its pid
-    and start time, so every server of a session shares it. Random when
-    no Claude process is found (a script, a test).
+    repour through one server, the DRC after it through the other).
+
+    The tag is made from CLAUDE_CODE_MESSAGING_SOCKET, which Claude Code
+    gives every process it starts and which names its own process: the
+    servers, and anything its shell starts, inherit it however they were
+    launched. Walking up to the Claude process missed a server started by
+    a script whose launcher had exited (the chain of parents ends there),
+    and Altium refused that session's writes as another's. Without the
+    variable (another client), the nearest Claude process above this one,
+    its pid and start time; random when there is none (a script, a test).
+
+    A server started with a cut-down environment has neither variable (a
+    script that starts its own server as an MCP client passes on only a
+    few), and when that script runs detached no Claude process is above it
+    either: each run was a new session and refused the board the run
+    before it wrote. So the variables are also read from the processes
+    above this one, nearest first, where the script itself still has them.
+
+    The tag found is put in EDA_AGENT_SESSION for the processes this one
+    starts, and is read back where Claude Code's variable is missing.
+    Nobody has to set it.
     """
+    import hashlib
+
+    def from_env(env) -> str:
+        socket = str(env.get(CLAUDE_SOCKET_ENV, "")).strip()
+        if socket:
+            return hashlib.sha1(f"socket:{socket}".encode()).hexdigest()[:8]
+        named = str(env.get(SESSION_ENV, "")).strip().lower()
+        if re.fullmatch(r"[0-9a-f]{8}", named):
+            return named
+        if named:
+            return hashlib.sha1(f"named:{named}".encode()).hexdigest()[:8]
+        return ""
+
+    tag = from_env(os.environ)
+    if tag:
+        return tag
     try:
-        import hashlib
         import psutil
         for parent in psutil.Process().parents():
+            try:
+                tag = from_env(parent.environ())
+            except Exception:  # noqa: BLE001 - not readable: go by its name
+                tag = ""
+            if tag:
+                return tag
             name = parent.name().lower()
             if name in ("claude.exe", "claude") or (
                     name.startswith("node") and any(
@@ -365,6 +410,7 @@ def _claude_session_tag() -> str:
 #: that is alone (ScanForRequestFile in Main.pas), and gives documents to the
 #: session that writes them.
 _SESSION_TAG = _claude_session_tag()
+os.environ[SESSION_ENV] = _SESSION_TAG
 _SEQUENCE = itertools.count(1)
 
 
@@ -484,9 +530,10 @@ def maintenance_in_progress(workspace_dir: Path) -> bool:
     return age < _MAINTENANCE_FRESH_S
 
 
-#: Set to 1 to fit the board (or sheet) in view after each command that
-#: changes the design, so whoever watches Altium always sees the whole
-#: board. Off by default: it moves the view, which a user zoomed in on one
+#: Set to 1 to fit the board outline, with a margin (or a sheet's objects),
+#: in view after each command that changes the design, so whoever watches
+#: Altium always sees the whole board, however many parts are parked off
+#: it. Off by default: it moves the view, which a user zoomed in on one
 #: corner would not want.
 KEEP_IN_VIEW_ENV = "EDA_AGENT_KEEP_BOARD_IN_VIEW"
 _KEEP_IN_VIEW_EVERY_S = 2.0
@@ -599,6 +646,9 @@ class CommandResponse:
     #: ``restored`` (put back in front), ``missing`` (closed) or
     #: ``not_restored``. Absent when it was already in front.
     session_document: Optional[dict] = None
+    #: Documents the command named that it loaded: they were not open before
+    #: it (see note_opened_documents).
+    opened_documents: list = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> "CommandResponse":
@@ -611,6 +661,7 @@ class CommandResponse:
             next_step=data.get("next_step") or "",
             active_document_changed=data.get("active_document_changed"),
             session_document=data.get("session_document"),
+            opened_documents=[str(d) for d in data.get("opened_documents") or []],
         )
 
 
@@ -707,6 +758,124 @@ def next_session_doc(current: str, command: str, params: dict,
     return current
 
 
+#: Where each session's document is kept, one file per session tag, so a
+#: server that restarts (a reconnect, an update) and the session's other
+#: server carry on with the document the session had in front. Kept only in
+#: memory, a restarted server sent no document and its first command ran on
+#: whatever another session had in front.
+SESSION_DOCS_DIR = "session_documents"
+SESSION_DOC_STALE_SECONDS = 14 * 24 * 3600
+
+
+def _session_doc_path(workspace_dir) -> Path:
+    return Path(workspace_dir) / SESSION_DOCS_DIR / f"{_SESSION_TAG}.json"
+
+
+#: Folder of each session's list of the documents its commands opened.
+OPENED_DOCS_DIR = "opened_documents"
+
+
+def _opened_docs_path(workspace_dir) -> Path:
+    return Path(workspace_dir) / OPENED_DOCS_DIR / f"{_SESSION_TAG}.json"
+
+
+def read_opened_documents(workspace_dir) -> list[str]:
+    """The documents this session's commands opened, oldest first."""
+    try:
+        data = json.loads(_opened_docs_path(workspace_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [str(d) for d in data] if isinstance(data, list) else []
+
+
+def keep_opened_documents(workspace_dir, docs: list[str]) -> None:
+    """Keep ``docs`` as this session's list. Never raises: losing it only
+    leaves documents open."""
+    path = _opened_docs_path(workspace_dir)
+    try:
+        if not docs:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(docs), encoding="utf-8")
+        replace_with_retry(tmp, path)
+    except OSError:
+        pass
+
+
+def note_opened_documents(workspace_dir, opened: list[str]) -> None:
+    """Add what a reply says its command opened to this session's list."""
+    if not opened:
+        return
+    docs = read_opened_documents(workspace_dir)
+    have = {os.path.normcase(d) for d in docs}
+    for d in opened:
+        if os.path.normcase(d) not in have:
+            docs.append(d)
+            have.add(os.path.normcase(d))
+    keep_opened_documents(workspace_dir, docs)
+
+
+def read_session_doc(workspace_dir) -> tuple[str, float]:
+    """The session's kept document and the file's time ('' and 0.0 if none)."""
+    path = _session_doc_path(workspace_dir)
+    try:
+        at = path.stat().st_mtime
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "", 0.0
+    doc = data.get("document") if isinstance(data, dict) else None
+    return (doc if isinstance(doc, str) else ""), at
+
+
+def keep_session_doc(workspace_dir, doc: str) -> float:
+    """Keep ``doc`` as the session's document ('' forgets it); answers the
+    file's time. Never raises: losing it costs a restart its pin, no more."""
+    path = _session_doc_path(workspace_dir)
+    try:
+        if not doc:
+            path.unlink(missing_ok=True)
+            return 0.0
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"document": doc}), encoding="utf-8")
+        replace_with_retry(tmp, path)
+        now = time.time()
+        for old in path.parent.glob("*.json"):
+            try:
+                if now - old.stat().st_mtime > SESSION_DOC_STALE_SECONDS:
+                    old.unlink()
+            except OSError:
+                pass
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+#: Touched in the workspace whenever Altium answers any server's call.
+ANSWER_STAMP = "keepalive.stamp"
+
+
+def _stamp_answer(workspace_dir: Path) -> None:
+    """Record that Altium answered a call just now, for every server's
+    keep-alive (_answered_within)."""
+    try:
+        (Path(workspace_dir) / ANSWER_STAMP).touch()
+    except OSError:
+        pass
+
+
+def _answered_within(workspace_dir: Path, seconds: float) -> bool:
+    """Whether Altium answered some server's call in the last ``seconds``."""
+    try:
+        age = time.time() - (Path(workspace_dir) / ANSWER_STAMP).stat().st_mtime
+    except OSError:
+        return False
+    # The file system may stamp a file a little ahead of time.time().
+    return -5.0 <= age < seconds
+
+
 class AltiumBridge:
     """Handles communication with Altium Designer via file-based IPC.
 
@@ -752,12 +921,30 @@ class AltiumBridge:
         self._last_command: Optional[tuple] = None
         # The document this session last had in front, sent with every
         # command so Altium can put it back if another session moved the
-        # focus in between. Empty until the session's first command.
+        # focus in between. Read from the session's file (SESSION_DOCS_DIR)
+        # whenever that file changes, and written there when it changes.
         self._session_doc = ""
+        self._session_doc_at = -1.0
         # The script version Altium last reported (every ping carries it),
         # and when a reply last said this server is out of date.
         self._loop_script_version = ""
         self._outdated_noted_at = 0.0
+
+    def _load_session_doc(self) -> None:
+        """Take the session's document from its file when the file has
+        changed: after a restart, or when the session's other server moved
+        it. One stat per command when nothing changed."""
+        path = _session_doc_path(self.config.workspace_dir)
+        try:
+            at = path.stat().st_mtime
+        except OSError:
+            at = 0.0
+        if at == self._session_doc_at:
+            return
+        doc, at = read_session_doc(self.config.workspace_dir)
+        if at or self._session_doc_at < 0:
+            self._session_doc = doc
+        self._session_doc_at = at
 
     def _note_fault(self, workspace_dir, guidance: dict) -> None:
         """Persist a fault for the dashboard recovery banner (best-effort)."""
@@ -993,6 +1180,11 @@ class AltiumBridge:
                 else ticks_per_ping
             if tick >= due:
                 tick = 0
+                if consecutive_failures == 0 and _answered_within(
+                        self.config.workspace_dir, self.KEEPALIVE_INTERVAL):
+                    # Altium answered a call of this server or another one
+                    # within the interval: that kept the loop awake already.
+                    continue
                 try:
                     self.send_command("application.ping", timeout=5.0)
                     if consecutive_failures >= slow_after:
@@ -1014,24 +1206,26 @@ class AltiumBridge:
         """If the Altium status form dropped open_dashboard.url, open it.
 
         The sentinel file's content is a URL (anything starting with http:// or
-        https:// is accepted). The file is removed after the open call so the
-        same trigger doesn't fire twice. Any error is logged and swallowed --
-        a missing sentinel is the common case on every tick.
+        https:// is accepted), or ``help:<setting>`` for the Config tab's
+        help page (see ``web.help``). Every server process and the dashboard watch
+        the same file, so it is taken with take_file_text: one of them opens
+        the page, once. Any error is logged and swallowed -- a missing
+        sentinel is the common case on every tick.
         """
+        from ..atomicfile import take_file_text
+
         sentinel = self.config.workspace_dir / "open_dashboard.url"
         if not sentinel.exists():
             return
-        try:
-            url = sentinel.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
+        url = take_file_text(sentinel)
+        if url is None:
             return
-        try:
-            sentinel.unlink()
-        except OSError:
-            pass
-        if not url.startswith("http://") and not url.startswith("https://"):
+        from ..web.help import link_target
+        target = link_target(url, self.config.workspace_dir)
+        if target is None:
             logger.debug("dashboard sentinel had bad URL: %r", url[:80])
             return
+        url = target
         try:
             import webbrowser
             webbrowser.open(url)
@@ -1174,6 +1368,12 @@ class AltiumBridge:
                 early = self._dialog_probe()
                 if early and early.get("blocked") and self._recover_script_crash(
                         request_id, response_path, early) == "continue":
+                    continue
+                # A box the crashed call is no longer there to answer: this
+                # call answers it rather than failing on it (see
+                # _clear_orphan_crash).
+                if early and early.get("blocked") and self._clear_orphan_crash(
+                        request_id, early) == "continue":
                     continue
                 # Another session is clearing a crash or restarting the
                 # loop: a request not yet taken waits for the new loop.
@@ -1529,6 +1729,88 @@ class AltiumBridge:
         raise AltiumScriptCrashError(script_crash.crash_message(outcome),
                                      details=outcome)
 
+    def _clear_orphan_crash(self, request_id: str,
+                            probe: Optional[dict]) -> Optional[str]:
+        """Answer a script error box that an EARLIER call left behind.
+
+        _recover_script_crash only acts for the call whose handler crashed.
+        When that caller has gone (exited, timed out, or a client without
+        this recovery), nothing else presses OK, and every other session's
+        call would fail on the box until a person closed it.
+
+        Only while THIS call's request is still queued (the loop is not
+        running it) and no one holds the recovery marker. The crashed call
+        is given ORPHAN_GRACE_S to answer its own box; after that this
+        call claims the marker, recovers exactly as the crashed call would
+        have, and goes on waiting for the new loop. Returns "continue" while
+        it waits or after it recovered, None when there is nothing for it.
+        """
+        from . import script_crash
+
+        workspace_dir = self.config.workspace_dir
+        if not self._request_path(request_id).exists():
+            return None
+        dialog = script_crash.script_error_dialog(probe)
+        if dialog is None or maintenance_in_progress(workspace_dir):
+            return None
+        hwnd = int(dialog.get("hwnd") or 0)
+        seen = self.__dict__.setdefault("_orphan_seen", {})
+        first = seen.setdefault(hwnd, time.monotonic())
+        if time.monotonic() - first < script_crash.ORPHAN_GRACE_S:
+            return "continue"
+        try:
+            from ..ui import windows
+
+            if not windows.available():
+                return None
+            process = self.process_manager.get_altium_info()
+            if not process:
+                return None
+        except Exception:                        # pragma: no cover - guard
+            return None
+        marker = Path(workspace_dir) / MAINTENANCE_FILE
+        if not script_crash.claim_marker(marker,
+                                         "orphaned script crash recovery"):
+            return "continue"
+        seen.pop(hwnd, None)
+        _trace_log(workspace_dir,
+                   f"SCRIPT_CRASH_ORPHAN id={request_id[:8]} "
+                   f"box={dialog.get('title', '')[:40]}")
+
+        def drop_marker() -> None:
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+
+        outcome = None
+        try:
+            outcome = script_crash.recover_orphan(workspace_dir, process.pid,
+                                                  dialog, drop_marker)
+        finally:
+            restarting = bool(outcome and (outcome.get("restart") or {})
+                              .get("in_background"))
+            if not restarting:
+                drop_marker()
+        if outcome and outcome.get("halted"):
+            logger.error("An earlier call had crashed the Altium script and "
+                         "left its error box up; it was answered and the "
+                         "loop restarted. %s", outcome.get("record"))
+        _CALL.answered_box = {
+            "title": dialog.get("title"),
+            "said": dialog.get("message") or dialog.get("ocr_text") or [],
+            "screenshots": (outcome or {}).get("screenshots") or [],
+            "record": (outcome or {}).get("record") or "",
+            "note": ("An earlier call had crashed the Altium script and left "
+                     "this error box up with no one to answer it. OK was "
+                     "pressed"
+                     + (" and the loop restarted" if (outcome or {}).get("halted")
+                        else "")
+                     + "; this command then ran. That earlier call's change "
+                     "may be half applied."),
+        }
+        return "continue"
+
     @staticmethod
     def _dialog_suffix(probe: Optional[dict], owner: Optional[dict] = None) -> str:
         """One sentence naming what is blocking, for the timeout text."""
@@ -1646,6 +1928,8 @@ class AltiumBridge:
 
     def _execute_command(self, command: str, params: dict[str, Any], timeout: float) -> Any:
         """Execute a command synchronously (blocking)."""
+        if not _unpinned(command, params):
+            self._load_session_doc()
         request = CommandRequest(
             command=command, params=params,
             session_doc="" if _unpinned(command, params) else self._session_doc,
@@ -1682,11 +1966,15 @@ class AltiumBridge:
             )
 
         if not _unpinned(command, params):
-            self._session_doc = next_session_doc(
-                self._session_doc, command, params, response)
+            after = next_session_doc(self._session_doc, command, params, response)
+            if after != self._session_doc:
+                self._session_doc = after
+                self._session_doc_at = keep_session_doc(self.config.workspace_dir, after)
 
         shown = self._reshow_hidden_frame(command, request.id)
         answered = getattr(_CALL, "answered_box", None)
+        _stamp_answer(workspace_dir)
+        note_opened_documents(workspace_dir, response.opened_documents)
 
         if response.success:
             note("Command %s succeeded", command)
@@ -1766,7 +2054,36 @@ class AltiumBridge:
         collector = bulk.current()
         if collector is not None and refuse_command(command, params) is None:
             return await collector.submit(command, params or {}, timeout)
+        try:
+            return await self.send_command_direct(command, params, timeout)
+        except AltiumError as exc:
+            path = await self._library_to_focus(command, exc)
+            if not path:
+                raise
+        # A library command with the other kind of library in front: with
+        # exactly one library of the kind it needs open, that is the one it
+        # meant. The agent otherwise focused libraries by hand, and a
+        # library focused early shows its last part until the next exists.
+        await self.send_command_direct(
+            "application.set_active_document", {"file_path": path})
         return await self.send_command_direct(command, params, timeout)
+
+    async def _library_to_focus(self, command: str, exc: Exception) -> str:
+        """The only open library of the kind a refused ``library.*``
+        command needs, else empty."""
+        ext = {"NO_PCBLIB": ".pcblib", "NO_SCHLIB": ".schlib"}.get(
+            str(getattr(exc, "code", "") or ""))
+        if not ext or not command.startswith("library."):
+            return ""
+        try:
+            docs = await self.send_command_direct("application.get_open_documents", {})
+        except AltiumError:
+            return ""
+        docs = docs if isinstance(docs, list) else (docs or {}).get("documents") or []
+        paths = sorted({str(d.get("file_path") or "") for d in docs
+                        if isinstance(d, dict)
+                        and str(d.get("file_path") or "").lower().endswith(ext)})
+        return paths[0] if len(paths) == 1 else ""
 
     async def send_bulk_async(
         self,
@@ -1861,7 +2178,7 @@ class AltiumBridge:
             try:
                 await loop.run_in_executor(
                     _executor, self._execute_command,
-                    "generic.zoom", {"action": "fit"}, 10.0)
+                    "generic.zoom", {"action": "board"}, 10.0)
             except Exception:  # a view nicety never fails the call it follows
                 pass
         return result

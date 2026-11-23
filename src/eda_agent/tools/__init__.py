@@ -24,8 +24,10 @@ from .application import (
 )
 from .guidance import register_guidance_tools
 from .update import register_update_tools
+from .length_units import register_length_units_tools
 from .uiauto import register_uiauto_tools
 from .project import register_project_tools
+from .convert import register_convert_tools
 from .library import register_library_tools
 from .ipc_batch import register_ipc_batch_tools
 from .generic import register_generic_tools
@@ -95,7 +97,6 @@ OFFLINE_DESIGN_TOOLS = (
     "design_add_part",
     "design_apply_hierarchy",
     "design_autonomy_guide",
-    "design_bom_file",
     "design_compose_netlist",
     "design_compute_component_value",
     "design_connect_bus",
@@ -115,14 +116,12 @@ OFFLINE_DESIGN_TOOLS = (
     "design_phase_gate",
     "design_phase_standing",
     "design_plan_hierarchy",
-    "design_review_file",
     "design_session_log",
     "design_session_report",
     "design_session_resume",
     "design_session_start",
     "design_session_status",
     "design_simulate_deck",
-    "design_solve_netlist_file",
     "design_suggest_diff_pair_traces",
     "design_suggest_partition",
     "design_synthesize_rules",
@@ -199,6 +198,7 @@ def register_all_tools(mcp):
     register_uiauto_tools(mcp)
     register_application_tools(mcp)
     register_project_tools(mcp)
+    register_convert_tools(mcp)
     register_library_tools(mcp)
     register_ipc_batch_tools(mcp)
     register_generic_tools(mcp)
@@ -347,6 +347,8 @@ def _register_surface(mcp, backend: str = DEFAULT_BACKEND) -> str:
     register_meta_tools(mcp)
     # Updating eda-agent itself belongs to no EDA tool either.
     register_update_tools(mcp)
+    # The session's length unit applies to every tool on every backend.
+    register_length_units_tools(mcp)
     # tool_guide answers which tool for which DOCUMENT, and what is proven
     # impossible. That is a different question from tool_catalog's "what is
     # this called", and it is the one that has been getting wrong answers,
@@ -393,6 +395,7 @@ __all__ = [
     "register_uiauto_tools",
     "register_meta_tools",
     "register_update_tools",
+    "register_length_units_tools",
     "register_parts_tools",
     "register_live_tools",
     "register_footprint_tools",
@@ -400,6 +403,7 @@ __all__ = [
     "register_altium365_tools",
     "register_request_prompts",
     "register_project_tools",
+    "register_convert_tools",
     "register_library_tools",
     "register_ipc_batch_tools",
     "register_generic_tools",

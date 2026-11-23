@@ -546,15 +546,49 @@ Begin
         + 'Altium. EDA_AGENT_UI_AUTOMATION=0 in the AI client''s config also '
         + 'turns it off, whatever this says.';
     SetTip(lbl_CfgAuto, Tip);  SetTip(opt_AutoOn, Tip);  SetTip(opt_AutoOff, Tip);
-    Tip := 'Fit the board or sheet in the window after each edit the AI '
-        + 'makes, so you see the whole design. EDA_AGENT_KEEP_BOARD_IN_VIEW=1 '
+    Tip := 'Fit the board outline, with a margin, or the sheet in the window '
+        + 'after each edit the AI makes. Parts parked off the board do not '
+        + 'zoom the view out. EDA_AGENT_KEEP_BOARD_IN_VIEW=1 '
         + 'in the AI client''s config also turns it on.';
     SetTip(lbl_CfgView, Tip);  SetTip(opt_ViewOff, Tip);  SetTip(opt_ViewOn, Tip);
+    Tip := 'The unit the AI gives and reads lengths in: coordinates, widths, '
+        + 'clearances, thicknesses. Each AI session starts in this unit and '
+        + 'may change its own; every reply says which unit it is in.';
+    SetTip(lbl_CfgUnits, Tip);  SetTip(opt_UnitsMil, Tip);  SetTip(opt_UnitsMm, Tip);
     Tip := 'What happens to a dialog a tool opens, such as the Engineering '
         + 'Change Order or the Teardrops options. Automatic: the AI answers '
         + 'it as the tool was asked, then reads the result back. Manual: the '
         + 'dialog waits for you.';
     SetTip(lbl_CfgEco, Tip);  SetTip(opt_EcoAuto, Tip);  SetTip(opt_EcoManual, Tip);
+    Tip := 'Count the tokens each AI tool call costs, as an estimate from the '
+        + 'size of its text and pictures. The totals show on the dashboard''s '
+        + 'Tools panel and with eda-agent usage. Nothing is added to what the '
+        + 'AI reads.';
+    SetTip(lbl_CfgUsage, Tip);  SetTip(opt_UsageOff, Tip);  SetTip(opt_UsageOn, Tip);
+    Tip := 'How strictly the router holds the AI to routing discipline. '
+        + 'Enforced: a critical net (pair, clock, switching node, antenna '
+        + 'feed) needs a sourced routing brief first, and a round is written '
+        + 'only once the AI has answered every finding. Advisory: findings are '
+        + 'reported but nothing waits. Off: neither. The rules the AI gives '
+        + 'are obeyed at every level, and your own routing is never blocked.';
+    SetTip(lbl_CfgRouting, Tip);  SetTip(opt_RouteEnforced, Tip);
+    SetTip(opt_RouteAdvisory, Tip);  SetTip(opt_RouteOff, Tip);
+    Tip := 'Whether the AI may start Altium''s own autorouter. Not allowed: '
+        + 'the AI routes with the EDA Agent router, which follows its routing '
+        + 'brief and stops for review after each round. Allowed: the AI may '
+        + 'start Altium''s autorouter when you ask for it; the AI cannot work '
+        + 'or stop it until it ends. Your own use of it is never blocked.';
+    SetTip(lbl_CfgAutorouter, Tip);  SetTip(opt_AutorouterNotAllowed, Tip);
+    SetTip(opt_AutorouterAllowed, Tip);
+    Tip := 'Whether a footprint may keep a basic 3D model: extruded boxes, '
+        + 'cylinders or spheres instead of a STEP model of the part. Not '
+        + 'allowed: the AI reports each footprint that has one, asks you '
+        + 'whether to replace it, and builds the replacement from the '
+        + 'datasheet drawing.';
+    SetTip(lbl_CfgBasic3d, Tip);  SetTip(opt_Basic3dNotAllowed, Tip);
+    SetTip(opt_Basic3dAllowed, Tip);
+    SetTip(btn_Help, 'Open the help page in your browser: labelled pictures '
+        + 'of each part of this window, then every setting on the Config tab explained.');
     SetTip(btn_Update, 'A newer eda-agent is out. Ask your AI assistant to '
         + 'update it; it tells you what is new first.');
 End;
@@ -806,12 +840,14 @@ Begin
     OwnPanelColours(btn_CopyCmd);   OwnPanelColours(btn_Saving);
     OwnPanelColours(btn_CopyLog);   OwnPanelColours(tab_Config);
     OwnPanelColours(btn_Update);
+    OwnPanelColours(btn_Help);
     OwnPanelColours(pnl_Config);    OwnPanelColours(opt_FmtNone);
     OwnPanelColours(opt_FmtRkm);    OwnPanelColours(opt_FmtSi);
     OwnPanelColours(opt_FmtSiUnit);
     OwnPanelColours(opt_EditsAllowed); OwnPanelColours(opt_EditsReadOnly);
     OwnPanelColours(opt_AutoOn);    OwnPanelColours(opt_AutoOff);
     OwnPanelColours(opt_ViewOff);   OwnPanelColours(opt_ViewOn);
+    OwnPanelColours(opt_UnitsMil);  OwnPanelColours(opt_UnitsMm);
     OwnPanelColours(sep_Cfg1);      OwnPanelColours(sep_Cfg2);
     OwnPanelColours(sep_Cfg3);
     OwnPanelColours(opt_DeleteAllowed); OwnPanelColours(opt_DeleteRefused);
@@ -819,6 +855,14 @@ Begin
     OwnPanelColours(sep_Cfg4);      OwnPanelColours(sep_Cfg5);
     OwnPanelColours(sep_Cfg6);
     OwnPanelColours(opt_EcoAuto);   OwnPanelColours(opt_EcoManual);
+    OwnPanelColours(sep_Cfg8);
+    OwnPanelColours(opt_UsageOff);  OwnPanelColours(opt_UsageOn);
+    OwnPanelColours(sep_Cfg9);      OwnPanelColours(opt_RouteEnforced);
+    OwnPanelColours(opt_RouteAdvisory);  OwnPanelColours(opt_RouteOff);
+    OwnPanelColours(sep_Cfg10);     OwnPanelColours(opt_Basic3dNotAllowed);
+    OwnPanelColours(opt_Basic3dAllowed);
+    OwnPanelColours(opt_AutorouterNotAllowed);
+    OwnPanelColours(opt_AutorouterAllowed);
 End;
 
 
@@ -908,6 +952,71 @@ Begin
 End;
 
 
+{ A check on the Config tab is off when its name is in ChecksOff. }
+Function CheckIsOff(CheckName : String) : Boolean;
+Begin
+    Result := Pos(',' + CheckName + ',', ',' + ChecksOff + ',') > 0;
+End;
+
+{ The checks on the Config tab: On is the default, Off shows amber, and the }
+{ hint names every check that is off.                                      }
+Procedure PaintChecks(Dummy : Integer);
+Var
+    Off : String;
+Begin
+    Try
+        Off := '';
+        PaintOption(opt_ChkFpOn, Not CheckIsOff('footprint_drawing'));
+        PaintWarnOption(opt_ChkFpOff, CheckIsOff('footprint_drawing'));
+        If CheckIsOff('footprint_drawing') Then
+        Begin
+            If Off <> '' Then Off := Off + ', ';
+            Off := Off + 'footprints vs drawing';
+        End;
+        PaintOption(opt_ChkSymOn, Not CheckIsOff('symbol_pins'));
+        PaintWarnOption(opt_ChkSymOff, CheckIsOff('symbol_pins'));
+        If CheckIsOff('symbol_pins') Then
+        Begin
+            If Off <> '' Then Off := Off + ', ';
+            Off := Off + 'symbols vs pin table';
+        End;
+        PaintOption(opt_ChkPadOn, Not CheckIsOff('pins_pads'));
+        PaintWarnOption(opt_ChkPadOff, CheckIsOff('pins_pads'));
+        If CheckIsOff('pins_pads') Then
+        Begin
+            If Off <> '' Then Off := Off + ', ';
+            Off := Off + 'pins vs pads';
+        End;
+        PaintOption(opt_ChkBodyOn, Not CheckIsOff('model_body'));
+        PaintWarnOption(opt_ChkBodyOff, CheckIsOff('model_body'));
+        If CheckIsOff('model_body') Then
+        Begin
+            If Off <> '' Then Off := Off + ', ';
+            Off := Off + '3D bodies vs drawing';
+        End;
+        PaintOption(opt_ChkSpiceOn, Not CheckIsOff('spice_model'));
+        PaintWarnOption(opt_ChkSpiceOff, CheckIsOff('spice_model'));
+        If CheckIsOff('spice_model') Then
+        Begin
+            If Off <> '' Then Off := Off + ', ';
+            Off := Off + 'SPICE model files';
+        End;
+        PaintOption(opt_ChkFabOn, Not CheckIsOff('fab_export'));
+        PaintWarnOption(opt_ChkFabOff, CheckIsOff('fab_export'));
+        If CheckIsOff('fab_export') Then
+        Begin
+            If Off <> '' Then Off := Off + ', ';
+            Off := Off + 'fab exports';
+        End;
+        If Off = '' Then
+            lbl_CfgChecksHint.Caption := 'Every check runs before a part is '
+                + 'built or fab files are written.'
+        Else
+            lbl_CfgChecksHint.Caption := 'Off: ' + Off + '. Those run without '
+                + 'the check, and each result says it was skipped.';
+    Except End;
+End;
+
 { The agent and view settings on the Config tab, with what each does. }
 Procedure PaintAgentSettings(Dummy : Integer);
 Begin
@@ -946,9 +1055,17 @@ Begin
         PaintOption(opt_ViewOn, KeepInViewMode = 'on');
         If KeepInViewMode = 'on' Then
             lbl_CfgViewHint.Caption := 'After each edit the window is fitted '
-                + 'to the whole board or sheet, at most every 2 seconds.'
+                + 'to the board outline or the sheet, at most every 2 seconds.'
         Else
             lbl_CfgViewHint.Caption := 'The view stays where you put it.';
+        PaintOption(opt_UnitsMil, LengthUnits <> 'mm');
+        PaintOption(opt_UnitsMm, LengthUnits = 'mm');
+        If LengthUnits = 'mm' Then
+            lbl_CfgUnitsHint.Caption := 'New AI sessions give and read lengths '
+                + 'in millimetres.'
+        Else
+            lbl_CfgUnitsHint.Caption := 'New AI sessions give and read lengths '
+                + 'in mils.';
         PaintOption(opt_EcoAuto, DialogMode <> 'manual');
         PaintOption(opt_EcoManual, DialogMode = 'manual');
         If DialogMode = 'manual' Then
@@ -957,6 +1074,43 @@ Begin
         Else
             lbl_CfgEcoHint.Caption := 'The AI answers the dialogs its tools '
                 + 'open: change orders, teardrops.';
+        PaintOption(opt_UsageOff, UsageMode <> 'on');
+        PaintOption(opt_UsageOn, UsageMode = 'on');
+        If UsageMode = 'on' Then
+            lbl_CfgUsageHint.Caption := 'Each tool call''s token cost is '
+                + 'counted, for the dashboard and eda-agent usage.'
+        Else
+            lbl_CfgUsageHint.Caption := 'Tool calls are not counted.';
+        PaintOption(opt_RouteEnforced, (RoutingMode <> 'advisory') And (RoutingMode <> 'off'));
+        PaintOption(opt_RouteAdvisory, RoutingMode = 'advisory');
+        PaintOption(opt_RouteOff, RoutingMode = 'off');
+        If RoutingMode = 'off' Then
+            lbl_CfgRoutingHint.Caption := 'No brief is asked for and nothing '
+                + 'waits on findings. The AI''s rules are still obeyed.'
+        Else If RoutingMode = 'advisory' Then
+            lbl_CfgRoutingHint.Caption := 'Findings are reported; nothing waits '
+                + 'for the AI to answer them.'
+        Else
+            lbl_CfgRoutingHint.Caption := 'Critical nets need a sourced brief; '
+                + 'each finding is answered before a round is written.';
+        PaintOption(opt_AutorouterNotAllowed, AutorouterMode <> 'allowed');
+        PaintOption(opt_AutorouterAllowed, AutorouterMode = 'allowed');
+        If AutorouterMode = 'allowed' Then
+            lbl_CfgAutorouterHint.Caption := 'The AI may start Altium''s '
+                + 'autorouter when you ask for it.'
+        Else
+            lbl_CfgAutorouterHint.Caption := 'The AI routes with the EDA '
+                + 'Agent router and cannot start Altium''s autorouter.';
+        PaintOption(opt_Basic3dNotAllowed, Basic3dMode <> 'allowed');
+        PaintOption(opt_Basic3dAllowed, Basic3dMode = 'allowed');
+        If Basic3dMode = 'allowed' Then
+            lbl_CfgBasic3dHint.Caption := 'A footprint may keep extruded boxes, '
+                + 'cylinders or spheres as its 3D model.'
+        Else
+            lbl_CfgBasic3dHint.Caption := 'Footprints with only extruded boxes, '
+                + 'cylinders or spheres are reported, and you are asked before '
+                + 'each is replaced with a STEP model from its drawing.';
+        PaintChecks(0);
     Except End;
 End;
 
@@ -967,7 +1121,7 @@ Procedure ShowStatusForm(Dummy : Integer);
 Var
     NewLeft, NewTop : Integer;
     AvailL, AvailT, AvailW, AvailH : Integer;
-    Margin : Integer;
+    Margin, TaskbarH : Integer;
 Begin
     Try
         EnsureStatusBuffers(0);
@@ -1015,6 +1169,16 @@ Begin
         Except End;
         NewLeft := AvailL + AvailW - StatusForm.Width  - Margin;
         NewTop  := AvailT + AvailH - StatusForm.Height - Margin;
+        { An auto-hidden taskbar reserves no work area: the whole screen  }
+        { is reported, and the taskbar covers the window's foot when it   }
+        { slides up. The window then ends a taskbar's height above the    }
+        { screen's foot (48 px at 96 dpi on Windows 11), no margin more.  }
+        If AvailT + AvailH >= Screen.Height Then
+        Begin
+            TaskbarH := 48;
+            Try TaskbarH := (48 * Screen.PixelsPerInch) Div 96; Except End;
+            NewTop := AvailT + AvailH - StatusForm.Height - TaskbarH;
+        End;
         If NewLeft < AvailL Then NewLeft := AvailL;
         If NewTop  < AvailT Then NewTop  := AvailT;
         Try StatusForm.Left := NewLeft; Except End;
@@ -1389,6 +1553,27 @@ Begin
     Except End;
 End;
 
+{ Open the help page in the browser, on a setting when one is named. The }
+{ server or the dashboard, whichever takes the link file first, opens it; }
+{ with neither running, it opens once one starts.                         }
+Procedure OpenConfigHelp(Setting : String);
+Begin
+    Try
+        WriteFileContent(WorkspaceDir + 'open_dashboard.url', 'help:' + Setting);
+        ShowNotice('');
+    Except End;
+End;
+
+{ The Help button at the top right of the window: the help page, which }
+{ opens on labelled pictures of the window and explains every setting. }
+Procedure btn_HelpClick(Sender : TObject);
+Begin OpenConfigHelp(''); End;
+Procedure btn_HelpEnter(Sender : TObject);
+Begin Try btn_Help.Color := COLOR_BG_HOVER; Except End; End;
+Procedure btn_HelpLeave(Sender : TObject);
+Begin Try btn_Help.Color := COLOR_BG_ELEVATED; Except End; End;
+
+
 { A value format chosen on the Config tab is stored at once, so the server }
 { and a restart see it. Only SI takes a unit.                             }
 Procedure ChooseValueFormat(Choice : String; UnitChoice : String);
@@ -1424,7 +1609,12 @@ Begin
         Else If Setting = 'closing' Then ClosingMode := Choice
         Else If Setting = 'ui_automation' Then UiAutomationMode := Choice
         Else If Setting = 'keep_in_view' Then KeepInViewMode := Choice
-        Else If Setting = 'dialogs' Then DialogMode := Choice;
+        Else If Setting = 'length_units' Then LengthUnits := Choice
+        Else If Setting = 'dialogs' Then DialogMode := Choice
+        Else If Setting = 'usage' Then UsageMode := Choice
+        Else If Setting = 'routing' Then RoutingMode := Choice
+        Else If Setting = 'basic_3d_models' Then Basic3dMode := Choice
+        Else If Setting = 'altium_autorouter' Then AutorouterMode := Choice;
         StorePreferences(0);
         PaintAgentSettings(0);
         mmo_Log.Lines.Insert(0, '      ' + Setting + ' set to ' + Choice);
@@ -1466,6 +1656,118 @@ Begin ChooseAgentSetting('keep_in_view', 'off'); End;
 
 Procedure opt_ViewOnClick(Sender : TObject);
 Begin ChooseAgentSetting('keep_in_view', 'on'); End;
+
+Procedure opt_UnitsMilClick(Sender : TObject);
+Begin ChooseAgentSetting('length_units', 'mil'); End;
+
+Procedure opt_UnitsMmClick(Sender : TObject);
+Begin ChooseAgentSetting('length_units', 'mm'); End;
+
+Procedure opt_UsageOffClick(Sender : TObject);
+Begin ChooseAgentSetting('usage', 'off'); End;
+
+Procedure opt_UsageOnClick(Sender : TObject);
+Begin ChooseAgentSetting('usage', 'on'); End;
+
+Procedure opt_RouteEnforcedClick(Sender : TObject);
+Begin ChooseAgentSetting('routing', 'enforced'); End;
+
+Procedure opt_RouteAdvisoryClick(Sender : TObject);
+Begin ChooseAgentSetting('routing', 'advisory'); End;
+
+Procedure opt_RouteOffClick(Sender : TObject);
+Begin ChooseAgentSetting('routing', 'off'); End;
+
+Procedure opt_AutorouterNotAllowedClick(Sender : TObject);
+Begin ChooseAgentSetting('altium_autorouter', 'not_allowed'); End;
+
+Procedure opt_AutorouterAllowedClick(Sender : TObject);
+Begin ChooseAgentSetting('altium_autorouter', 'allowed'); End;
+
+Procedure opt_Basic3dNotAllowedClick(Sender : TObject);
+Begin ChooseAgentSetting('basic_3d_models', 'not_allowed'); End;
+
+Procedure opt_Basic3dAllowedClick(Sender : TObject);
+Begin ChooseAgentSetting('basic_3d_models', 'allowed'); End;
+
+{ A check switched on or off on the Config tab, stored at once. }
+Procedure ChooseCheck(CheckName : String; TurnOn : Boolean);
+Var
+    Rest, Item, Kept : String;
+    P : Integer;
+Begin
+    Try
+        Kept := '';
+        Rest := ChecksOff;
+        While Rest <> '' Do
+        Begin
+            P := Pos(',', Rest);
+            If P = 0 Then
+            Begin
+                Item := Rest;
+                Rest := '';
+            End
+            Else
+            Begin
+                Item := Copy(Rest, 1, P - 1);
+                Rest := Copy(Rest, P + 1, Length(Rest));
+            End;
+            If (Item <> '') And (Item <> CheckName) Then
+            Begin
+                If Kept <> '' Then Kept := Kept + ',';
+                Kept := Kept + Item;
+            End;
+        End;
+        If Not TurnOn Then
+        Begin
+            If Kept <> '' Then Kept := Kept + ',';
+            Kept := Kept + CheckName;
+        End;
+        ChecksOff := Kept;
+        StorePreferences(0);
+        PaintAgentSettings(0);
+        If TurnOn Then
+            mmo_Log.Lines.Insert(0, '      check ' + CheckName + ' on')
+        Else
+            mmo_Log.Lines.Insert(0, '      check ' + CheckName + ' off');
+    Except End;
+End;
+
+Procedure opt_ChkFpOnClick(Sender : TObject);
+Begin ChooseCheck('footprint_drawing', True); End;
+
+Procedure opt_ChkFpOffClick(Sender : TObject);
+Begin ChooseCheck('footprint_drawing', False); End;
+
+Procedure opt_ChkSymOnClick(Sender : TObject);
+Begin ChooseCheck('symbol_pins', True); End;
+
+Procedure opt_ChkSymOffClick(Sender : TObject);
+Begin ChooseCheck('symbol_pins', False); End;
+
+Procedure opt_ChkPadOnClick(Sender : TObject);
+Begin ChooseCheck('pins_pads', True); End;
+
+Procedure opt_ChkPadOffClick(Sender : TObject);
+Begin ChooseCheck('pins_pads', False); End;
+
+Procedure opt_ChkBodyOnClick(Sender : TObject);
+Begin ChooseCheck('model_body', True); End;
+
+Procedure opt_ChkBodyOffClick(Sender : TObject);
+Begin ChooseCheck('model_body', False); End;
+
+Procedure opt_ChkSpiceOnClick(Sender : TObject);
+Begin ChooseCheck('spice_model', True); End;
+
+Procedure opt_ChkSpiceOffClick(Sender : TObject);
+Begin ChooseCheck('spice_model', False); End;
+
+Procedure opt_ChkFabOnClick(Sender : TObject);
+Begin ChooseCheck('fab_export', True); End;
+
+Procedure opt_ChkFabOffClick(Sender : TObject);
+Begin ChooseCheck('fab_export', False); End;
 
 
 { ============================================================================ }
@@ -1565,7 +1867,7 @@ Begin
     Added := '"board_used":"' + EscapeJsonString(BoardFallbackPath) + '"'
         + ',"board_note":"No board was focused (' + EscapeJsonString(Front)
         + ' in front), so this used ' + EscapeJsonString(ExtractFileName(BoardFallbackPath))
-        + ', the first board of the open projects."';
+        + ', the one board of the open projects it could mean."';
     If Copy(Response, P, 1) <> Chr(125) Then Added := Added + ',';
     Result := Copy(Response, 1, P - 1) + Added + Copy(Response, P, Length(Response));
 End;
@@ -1589,6 +1891,11 @@ Begin
     If (Command = 'application.create_document') Or (Command = 'generic.add_sheet') Then
     Begin
         Result := SavingOffError(RequestId, 'A new document is created by writing its file.');
+        Exit;
+    End;
+    If Command = 'project.rename_document' Then
+    Begin
+        Result := SavingOffError(RequestId, 'A rename is made by saving the document under its new name.');
         Exit;
     End;
     If (Command = 'pcb.make_library') Or (Command = 'pcb.make_pad_via_library') Then
@@ -1729,6 +2036,7 @@ Begin
     End;
 
     ResetItemState(0);
+    NoteOpenProjects(0);
     Result := SavingRefusal(Command, Params, RequestId);
     If Result <> '' Then Exit;
     Case Category Of
@@ -1978,10 +2286,107 @@ Begin
         Or (Verb = 'clear_highlights')
         Or (Verb = 'layer_view')
         Or (Verb = 'document_owners')
-        Or (Verb = 'claim_document');
+        Or (Verb = 'claim_document')
+        Or (Verb = 'release_document')
+        Or (Verb = 'open');
 End;
 
 { END COMMAND RULES }
+
+{ The document a write acts on: the first path the command names, else the  }
+{ document in front (FOCUS). Every name a tool gives its document is read:  }
+{ a command that named its document as project_path or library_path used   }
+{ to be checked against the focused document instead, so a session was     }
+{ refused because of a document another session had left in front.         }
+{ A doc: scope names the document too. The project comes last: a sheet or  }
+{ board named beside it is the narrower target.                             }
+Function CommandTarget(Params : String; Focus : String) : String;
+Var
+    Scope : String;
+Begin
+    Result := ExtractJsonValue(Params, 'board_path');
+    If Result = '' Then Result := ExtractJsonValue(Params, 'expect_file');
+    If Result = '' Then Result := ExtractJsonValue(Params, 'file_path');
+    If Result = '' Then Result := ExtractJsonValue(Params, 'library_path');
+    If Result = '' Then Result := ExtractJsonValue(Params, 'sheet_path');
+    If Result = '' Then Result := ExtractJsonValue(Params, 'document_path');
+    If Result = '' Then Result := ExtractJsonValue(Params, 'outjob_path');
+    If Result = '' Then
+    Begin
+        Scope := ExtractJsonValue(Params, 'scope');
+        If LowerCase(Copy(Scope, 1, 4)) = 'doc:' Then
+            Result := Copy(Scope, 5, Length(Scope));
+    End;
+    If Result = '' Then Result := ExtractJsonValue(Params, 'project_path');
+    If Result = '' Then Result := Focus;
+End;
+
+{..............................................................................}
+{ The documents a command opened. Before the handler runs, the dispatcher    }
+{ notes which documents named in the command's parameters are loaded; the    }
+{ reply lists, as opened_documents, those loaded after it that were not      }
+{ before. A session can then close what it opened and nothing else: never a  }
+{ document the person had open, and never a project, which is not named here.}
+{..............................................................................}
+
+Function DocLoaded(Path : String) : Boolean;
+Begin
+    Result := False;
+    If Path = '' Then Exit;
+    Try
+        If Client.GetDocumentByPath(Path) <> Nil Then Result := True;
+    Except
+        Result := False;
+    End;
+End;
+
+{ Add VALUE to PATHS when it is a full file path: a folder and an extension. }
+Procedure AddDocPath(Paths : TStringList; Value : String);
+Begin
+    If LowerCase(Copy(Value, 1, 4)) = 'doc:' Then Value := Copy(Value, 5, Length(Value));
+    If Pos(Chr(92), Value) = 0 Then Exit;
+    If Pos('.', ExtractFileName(Value)) = 0 Then Exit;
+    If Paths.IndexOf(Value) < 0 Then Paths.Add(Value);
+End;
+
+Procedure CollectDocPaths(Params : String; Paths : TStringList);
+Begin
+    AddDocPath(Paths, ExtractJsonValue(Params, 'board_path'));
+    AddDocPath(Paths, ExtractJsonValue(Params, 'expect_file'));
+    AddDocPath(Paths, ExtractJsonValue(Params, 'file_path'));
+    AddDocPath(Paths, ExtractJsonValue(Params, 'library_path'));
+    AddDocPath(Paths, ExtractJsonValue(Params, 'sheet_path'));
+    AddDocPath(Paths, ExtractJsonValue(Params, 'document_path'));
+    AddDocPath(Paths, ExtractJsonValue(Params, 'outjob_path'));
+    AddDocPath(Paths, ExtractJsonValue(Params, 'scope'));
+End;
+
+{ '1' or '0' for each of PATHS, in order: loaded now. }
+Function LoadedNow(Paths : TStringList) : String;
+Var
+    K : Integer;
+Begin
+    Result := '';
+    For K := 0 To Paths.Count - 1 Do
+        If DocLoaded(Paths[K]) Then Result := Result + '1' Else Result := Result + '0';
+End;
+
+{ The opened_documents field: those of PATHS loaded now and not BEFORE; '' for none. }
+Function OpenedDocumentsField(Paths : TStringList; Before : String) : String;
+Var
+    K : Integer;
+    Items : String;
+Begin
+    Result := '';
+    Items := '';
+    For K := 0 To Paths.Count - 1 Do
+        If (Copy(Before, K + 1, 1) = '0') And DocLoaded(Paths[K]) Then
+        Begin
+            If Items <> '' Then Items := Items + ',';
+            Items := Items + '"' + EscapeJsonString(Paths[K]) + '"';
+        End;
+    If Items <> '' Then Result := '"opened_documents":[' + Items + ']';
+End;
 
 { The refusal for a write by REQUESTID's session to PATH, '' when allowed. }
 Function OwnerRefusal(Path : String; RequestId : String; Command : String) : String;
@@ -2002,7 +2407,8 @@ Begin
         + IntToStr(Age Div 1000) + ' s ago). Nothing was changed. Work on '
         + 'another document, or ask the user: application.claim_document '
         + '(app_claim_document) hands it over when they say so. It is free '
-        + 'again once that session has left it alone for '
+        + 'again when that session releases it (app_release_document) or '
+        + 'has left it alone for '
         + IntToStr(OWNER_IDLE_MS Div 60000) + ' minutes.');
 End;
 
@@ -2079,6 +2485,8 @@ Var
     Actor, OwnTarget : String;
     Writes, OwnRefused : Boolean;
     DashDetail, DashErrPayload, DashCode : String;
+    NamedDocs : TStringList;
+    LoadedBefore, OpenedField : String;
 Begin
     Result := False;
     EnsureWorkspaceDir(0);
@@ -2176,11 +2584,12 @@ Begin
       document in front once the session's own is back. }
     Actor := LowerCase(ExtractJsonValue(RequestContent, 'actor'));
     Writes := ExtractJsonValue(RequestContent, 'writes') = '1';
-    OwnTarget := ExtractJsonValue(Params, 'board_path');
-    If OwnTarget = '' Then OwnTarget := ExtractJsonValue(Params, 'expect_file');
-    If OwnTarget = '' Then OwnTarget := ExtractJsonValue(Params, 'file_path');
-    If OwnTarget = '' Then OwnTarget := FocusBefore;
+    OwnTarget := CommandTarget(Params, FocusBefore);
     ResetNextStep(0);
+    { Which documents the command names are loaded before it runs. }
+    NamedDocs := TStringList.Create;
+    CollectDocPaths(Params, NamedDocs);
+    LoadedBefore := LoadedNow(NamedDocs);
 
     ExceptionMsg := '';
     { Heartbeat: write progress_<id>.json so Python can distinguish "still      }
@@ -2225,6 +2634,7 @@ Begin
           way through may well have written something first, and that is
           exactly when a cached netlist is worth least. }
         If Not CommandIsReadOnly(Command) Then InvalidateCompileCache(0);
+        If Not CommandOnlyLooks(Command) Then CommandSerial := CommandSerial + 1;
 
         If ResponseContent = '' Then
         Begin
@@ -2247,6 +2657,10 @@ Begin
         If SessionNote <> '' Then
             ResponseContent := AppendEnvelopeField(ResponseContent, SessionNote);
 
+        OpenedField := OpenedDocumentsField(NamedDocs, LoadedBefore);
+        If OpenedField <> '' Then
+            ResponseContent := AppendEnvelopeField(ResponseContent, OpenedField);
+
         FocusAfter := CurrentFocusedDocPath(0);
         If FocusAfter <> FocusBefore Then
             ResponseContent := AppendEnvelopeField(ResponseContent,
@@ -2260,6 +2674,7 @@ Begin
         WriteResponseFile(RequestId, ResponseContent);
     Finally
         EndProgress(RequestId);
+        NamedDocs.Free;
     End;
 
     DurationMs := GetTickCount - StartMs;
@@ -2377,8 +2792,8 @@ Begin
     { Measured 2026-09-16: with the timer pump, closing Altium while        }
     { attached no longer hangs it. Altium ran its whole shutdown through to }
     { "Application Finalized" and exited, and Windows logged neither a hang }
-    { nor a crash. What it DID raise was an Access Violation in             }
-    { ScriptingSystem.DLL (read of FFFFFFFFFFFFFFFF) during teardown.       }
+    { nor a crash. What it DID raise was an access violation in the         }
+    { scripting engine during teardown.                                     }
     {                                                                       }
     { The two steps below are how you earn that: HideStatusForm touches a   }
     { form Altium is in the middle of destroying, and CleanupMCPServer      }
@@ -2400,10 +2815,9 @@ Begin
     { DO NOT CALL CleanupMCPServer HERE. Its Application.ProcessMessages   }
     { pumps the message loop from inside this form's OWN timer handler,    }
     { while that same form is being hidden, which re-enters the form as it }
-    { tears down. Measured 2026-09-18: pressing Detach raised "Access      }
-    { violation ... in module 'ScriptingSystem.DLL'. Read of address       }
-    { FFFFFFFFFFFFFFFF", the same signature the quit path produced before  }
-    { it stopped pumping. The old blocking loop ran this from              }
+    { tears down. Measured 2026-09-18: pressing Detach raised an access    }
+    { violation in the scripting engine, the same one the quit path        }
+    { produced before it stopped pumping. The old blocking loop ran this from              }
     { StartMCPServer's exit rather than from a timer event on the form,    }
     { which is why it only appeared once dispatch moved onto the timer.    }
     {                                                                      }

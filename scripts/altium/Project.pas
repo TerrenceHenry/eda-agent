@@ -40,7 +40,7 @@ Begin
         Proj := Workspace.DM_Projects(I);
         If Proj <> Nil Then
         Begin
-            If Proj.DM_ProjectFullPath = ProjectPath Then
+            If SameText(Proj.DM_ProjectFullPath, ProjectPath) Then
             Begin
                 Result := Proj;
                 Exit;
@@ -49,69 +49,110 @@ Begin
     End;
 End;
 
-Function Proj_Create(Params : String; RequestId : String) : String;
+{ ProjectListsDocument - the project's own document list holds DocPath. }
+Function ProjectListsDocument(Project : IProject; DocPath : String) : Boolean;
 Var
-    ProjectPath, ProjectType, ProjectExt : String;
-    StubContent : String;
-    F : TextFile;
+    I : Integer;
+    Doc : IDocument;
+    Full : String;
+Begin
+    Result := False;
+    If Project = Nil Then Exit;
+    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(I);
+        If Doc = Nil Then Continue;
+        Full := '';
+        Try Full := Doc.DM_FullPath; Except End;
+        If SameText(Full, DocPath) Then
+        Begin
+            Result := True;
+            Exit;
+        End;
+    End;
+End;
+
+{..............................................................................}
+{ CreateProjectThroughAltium - a new project made and saved by Altium:        }
+{ IWorkspace.DM_CreateNewDocument(Kind) makes it, untitled, and              }
+{ DoSafeChangeFileNameAndSave puts it under ProjectPath. Kind is the editor  }
+{ window kind (PCBPROJECT, HARNESSDESIGN). Returns '' when saved, else what  }
+{ went wrong.                                                                 }
+{..............................................................................}
+Function CreateProjectThroughAltium(ProjectPath : String; Kind : String) : String;
+Var
+    Workspace : IWorkspace;
+    NewPath : String;
+    Doc : IServerDocument;
     Saved : Boolean;
 Begin
-    ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectType := ExtractJsonValue(Params, 'project_type');
-
-    If ProjectType = '' Then ProjectType := 'PCB';
-
-    // Altium project files are INI-like text. Write a minimal stub directly
-    // to disk so we don't trigger the GUI New Project dialog, then open it
-    // via WorkspaceManager:OpenObject (the documented programmatic open).
-    // The stub is the smallest .PrjPcb that Altium will load and let us
-    // attach documents to.
-    If ProjectType = 'PCB' Then
-    Begin
-        ProjectExt := '.PrjPcb';
-        StubContent :=
-            '[Design]' + #13#10 +
-            'Version=1.0' + #13#10 +
-            'HierarchyMode=0' + #13#10 +
-            'OpenOutputs=1' + #13#10 +
-            'ArchiveProject=0' + #13#10;
-    End
-    Else
-    Begin
-        ProjectExt := '.PrjPcb';
-        StubContent := '[Design]' + #13#10 + 'Version=1.0' + #13#10;
-    End;
-
-    Saved := False;
-    // Ensure the target directory exists; Rewrite throws EInOutError
-    // ("Invalid file name") into an engine modal if the folder is missing,
-    // and that modal escapes the Try/Except below.
-    Try ForceDirectories(ExtractFilePath(ProjectPath)); Except End;
+    Result := '';
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Begin Result := 'no workspace'; Exit; End;
+    NewPath := '';
     Try
-        AssignFile(F, ProjectPath);
-        Rewrite(F);
-        Try
-            Write(F, StubContent);
-        Finally
-            CloseFile(F);
-        End;
-        Saved := FileExists(ProjectPath);
+        NewPath := Workspace.DM_CreateNewDocument(Kind);
+    Except
+        NewPath := '';
+    End;
+    If NewPath = '' Then
+    Begin
+        Result := 'Altium made no new ' + Kind + ' document';
+        Exit;
+    End;
+    Doc := Nil;
+    Try Doc := Client.GetDocumentByPath(NewPath); Except Doc := Nil; End;
+    If Doc = Nil Then
+    Begin
+        Result := 'Altium made ' + NewPath + ' but it could not be found to save';
+        Exit;
+    End;
+    Saved := False;
+    Try
+        Saved := Doc.DoSafeChangeFileNameAndSave(ProjectPath, Kind);
     Except
         Saved := False;
     End;
+    If Not (Saved And FileExists(ProjectPath)) Then
+        Result := 'Altium made ' + NewPath + ' but did not save it as ' + ProjectPath
+            + '; it is open, unsaved, in the Projects panel';
+End;
 
-    If Not Saved Then
+{..............................................................................}
+{ Proj_Create - a new, empty project, made and saved by Altium (no file is    }
+{ written here). The extension picks the kind (.PrjHar, .LibPkg, .PrjMbd,    }
+{ .PrjScr; anything else a PCB project). An existing file is left alone.     }
+{..............................................................................}
+Function Proj_Create(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, Kind, Problem, Ext : String;
+Begin
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    If ProjectPath = '' Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED',
-            'Could not write project stub: ' + ProjectPath);
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'project_path is required');
         Exit;
     End;
-
-    // Open the freshly-written project so subsequent commands can target it.
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Project');
-    AddStringParameter('FileName', ProjectPath);
-    RunProcess('WorkspaceManager:OpenObject');
+    If FileExists(ProjectPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'PROJECT_EXISTS',
+            ProjectPath + ' already exists; open it with proj_open, or choose a new path.');
+        Exit;
+    End;
+    { The editor window kinds WorkspaceManager.ins gives each extension. }
+    Ext := LowerCase(ExtractFileExt(ProjectPath));
+    If Ext = '.prjhar' Then Kind := 'HARNESSDESIGN'
+    Else If Ext = '.libpkg' Then Kind := 'INTEGRATEDLIBRARY'
+    Else If Ext = '.prjmbd' Then Kind := 'SYSTEMDESIGN'
+    Else If Ext = '.prjscr' Then Kind := 'SCRIPTPROJECT'
+    Else Kind := 'PCBPROJECT';
+    Try ForceDirectories(ExtractFilePath(ProjectPath)); Except End;
+    Problem := CreateProjectThroughAltium(ProjectPath, Kind);
+    If Problem <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', Problem);
+        Exit;
+    End;
 
     { SAY WHETHER IT IS FOCUSED, because it usually is not, and the next      }
     { call the caller makes probably assumes it is. Altium's focused project  }
@@ -124,7 +165,7 @@ Begin
     { before, which during the live sweep was a client design.                }
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"project_path":"' + EscapeJsonString(ProjectPath) +
-        '","saved":true,"focused":'
+        '","kind":"' + Kind + '","saved":true,"focused":'
         + BoolToJsonStr(FocusedProjectPathIs(ProjectPath))
         + ',"note":"a new project has no documents, so it cannot become the '
         + 'focused project. Pass project_path explicitly to proj_add_document, '
@@ -668,9 +709,14 @@ Begin
         If Project <> Nil Then
         Begin
             Project.DM_AddSourceDocument(DocumentPath);
-            { Written now, or the add is gone after a reopen. }
-            Result := BuildSuccessResponse(RequestId, '{"success":true,"project_saved":'
-                + BoolToJsonStr(SaveProjectFile(Project)) + '}');
+            { Written now, or the add is gone after a reopen. save_project   }
+            { false keeps it in memory only, for a document that is taken    }
+            { out again before anything is saved.                            }
+            If LowerCase(ExtractJsonValue(Params, 'save_project')) = 'false' Then
+                Result := BuildSuccessResponse(RequestId, '{"success":true,"project_saved":false}')
+            Else
+                Result := BuildSuccessResponse(RequestId, '{"success":true,"project_saved":'
+                    + BoolToJsonStr(SaveProjectFile(Project)) + '}');
         End
         Else
             Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND', 'Project not found');
@@ -679,63 +725,297 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
 End;
 
-{ The DocumentPath= line of the project FILE that names DocPath's file, or   }
+{ WHAT A SAVED PROJECT FILE HOLDS IS ASKED OF ALTIUM. The file is never     }
+{ opened here. A copy of it is made beside it, Altium loads the copy as a    }
+{ hidden project (IWorkspace.DM_LoadProjectHidden), its documents are read   }
+{ off that project, and the copy is closed and deleted. Measured on AD       }
+{ 26.11.1.5: under a second, the Projects panel and the focused project      }
+{ unchanged, and the only thing left behind was the copy's .PrjPcbStructure, }
+{ deleted here. A copy in another folder listed nothing, because Altium      }
+{ lists only the documents whose files it finds, so the copy has to sit      }
+{ beside the original.                                                       }
+{                                                                             }
+{ ProjectFileDocumentList gives the full path of each document with a file,  }
+{ each followed by a tab. Loaded is False when Altium could not load the     }
+{ copy, which is not the same as a project file that names nothing.          }
+Function ProjectFileDocumentList(ProjPath : String; Var Loaded : Boolean) : String;
+Var
+    Workspace : IWorkspace;
+    Hidden : IProject;
+    Doc : IDocument;
+    Ext, CopyPath, SidePath, DocPath, List : String;
+    I : Integer;
+    HadSide : Boolean;
+Begin
+    List := '';
+    Loaded := False;
+    Workspace := GetWorkspace;
+    If (ProjPath <> '') And FileExists(ProjPath) And (Workspace <> Nil) Then
+    Begin
+        Ext := ExtractFileExt(ProjPath);
+        CopyPath := Copy(ProjPath, 1, Length(ProjPath) - Length(Ext)) + '.eda-read' + Ext;
+        SidePath := CopyPath + 'Structure';
+        HadSide := FileExists(SidePath);
+        If FileExists(CopyPath) Then DeleteFile(CopyPath);
+        If (Not FileExists(CopyPath)) And CopyFile(ProjPath, CopyPath, False) Then
+        Begin
+            Try
+                Hidden := Nil;
+                Try Hidden := Workspace.DM_LoadProjectHidden(CopyPath); Except Hidden := Nil; End;
+                If Hidden <> Nil Then
+                Begin
+                    Loaded := True;
+                    For I := 0 To Hidden.DM_LogicalDocumentCount - 1 Do
+                    Begin
+                        DocPath := '';
+                        Doc := Hidden.DM_LogicalDocuments(I);
+                        If Doc <> Nil Then Try DocPath := Doc.DM_FullPath; Except DocPath := ''; End;
+                        If (DocPath <> '') And FileExists(DocPath) Then
+                            List := List + DocPath + #9;
+                    End;
+                    Try Workspace.DM_CloseProject(CopyPath); Except { reported by the count of open projects } End;
+                End;
+            Finally
+                DeleteFile(CopyPath);
+                If (Not HadSide) And FileExists(SidePath) Then DeleteFile(SidePath);
+            End;
+        End;
+    End;
+    Result := List;
+End;
+
+{ The document of a ProjectFileDocumentList that has DocPath's file name, or }
 { ''. Matched on the file name alone, so a same-named document in another    }
 { folder reads as still listed: the error falls on "not removed", never on   }
 { a false "removed".                                                          }
-Function ProjectFileEntryFor(ProjPath, DocPath : String) : String;
+Function ProjectListEntryFor(List, DocPath : String) : String;
 Var
-    SL : TStringList;
-    I : Integer;
-    Line, Value, Want : String;
+    Rest, One, Want, Found : String;
+    P : Integer;
 Begin
-    Result := '';
+    Found := '';
     Want := UpperCase(ExtractFileName(DocPath));
-    SL := TStringList.Create;
-    Try
-        If LoadTextFile(SL, ProjPath) Then
+    Rest := List;
+    While (Rest <> '') And (Found = '') Do
+    Begin
+        P := Pos(#9, Rest);
+        If P = 0 Then P := Length(Rest) + 1;
+        One := Copy(Rest, 1, P - 1);
+        Rest := Copy(Rest, P + 1, Length(Rest));
+        If (One <> '') And (UpperCase(ExtractFileName(One)) = Want) Then Found := One;
+    End;
+    Result := Found;
+End;
+
+{ How many documents a ProjectFileDocumentList holds. }
+Function ProjectListCount(List : String) : Integer;
+Var
+    I, N : Integer;
+Begin
+    N := 0;
+    For I := 1 To Length(List) Do
+        If Copy(List, I, 1) = #9 Then N := N + 1;
+    Result := N;
+End;
+
+{ A ProjectFileDocumentList as a JSON array, or null when the file could not }
+{ be loaded.                                                                 }
+Function ProjectListJson(List : String; Loaded : Boolean) : String;
+Var
+    Rest, One, Json : String;
+    P : Integer;
+Begin
+    Json := '';
+    Rest := List;
+    While Rest <> '' Do
+    Begin
+        P := Pos(#9, Rest);
+        If P = 0 Then P := Length(Rest) + 1;
+        One := Copy(Rest, 1, P - 1);
+        Rest := Copy(Rest, P + 1, Length(Rest));
+        If One = '' Then Continue;
+        If Json <> '' Then Json := Json + ',';
+        Json := Json + '"' + EscapeJsonString(One) + '"';
+    End;
+    If Loaded Then
+        Json := '[' + Json + ']'
+    Else
+        Json := 'null';
+    Result := Json;
+End;
+
+{ The documents the saved project file holds, as Altium loads them, as a     }
+{ JSON array; null when it could not be loaded. More than the project's own  }
+{ documents is the leftover Altium's writer keeps after a removal.           }
+Function ProjectFileDocumentsJson(ProjPath : String) : String;
+Var
+    List, Json : String;
+    Loaded : Boolean;
+Begin
+    List := ProjectFileDocumentList(ProjPath, Loaded);
+    Json := ProjectListJson(List, Loaded);
+    Result := Json;
+End;
+
+{ project.file_documents: what the saved project file lists, to check a      }
+{ rewrite of it.                                                             }
+Function Proj_FileDocuments(Params : String; RequestId : String) : String;
+Var
+    ProjPath : String;
+Begin
+    ProjPath := ExtractJsonValue(Params, 'project_path');
+    If (ProjPath = '') Or (Not FileExists(ProjPath)) Then
+        Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND',
+            'No project file at: ' + ProjPath)
+    Else
+        Result := BuildSuccessResponse(RequestId, '{"project_path":"'
+            + EscapeJsonString(ProjPath) + '","file_documents":'
+            + ProjectFileDocumentsJson(ProjPath) + '}');
+End;
+
+{ project.rewrite_file: the project file written fresh by Altium, without the }
+{ documents its save keeps from the file already on disk.                     }
+{                                                                             }
+{ Altium's project writer merges into the file at the target path: saved over }
+{ itself, every section past the new count stays. Saved to a path with no     }
+{ file, it lists only the documents the project holds. So the project is      }
+{ saved as a copy beside it, Altium loads the copy and it must hold           }
+{ expected_count documents, the original is deleted and the project saved     }
+{ back under its own name, onto no file. The copy is deleted only once the    }
+{ original holds expected_count again; otherwise it stays, and the reply      }
+{ names it.                                                                   }
+Function Proj_RewriteFile(Params : String; RequestId : String) : String;
+Var
+    ProjPath, Kind, Via, Ext, Problem, ViaList, List : String;
+    ProjDoc : IServerDocument;
+    Expected, ViaCount, Count : Integer;
+    Saved, ViaSaved, Deleted, CopyKept, ViaLoaded, Loaded : Boolean;
+Begin
+    ProjPath := ExtractJsonValue(Params, 'project_path');
+    If (ProjPath = '') Or (Not FileExists(ProjPath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND',
+            'No project file at: ' + ProjPath);
+        Exit;
+    End;
+    If SaveHeldBack(ProjPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SAVING_OFF',
+            'Saving is switched off on the bridge dashboard');
+        Exit;
+    End;
+    ProjDoc := Nil;
+    Try ProjDoc := Client.GetDocumentByPath(ProjPath); Except ProjDoc := Nil; End;
+    If ProjDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_OPEN',
+            'The project is not open in Altium: ' + ProjPath);
+        Exit;
+    End;
+    If Not IsIntStr(ExtractJsonValue(Params, 'expected_count')) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_COUNT',
+            'expected_count must be the number of documents the file should list');
+        Exit;
+    End;
+    Expected := StrToInt(ExtractJsonValue(Params, 'expected_count'));
+    Ext := ExtractFileExt(ProjPath);
+    Via := Copy(ProjPath, 1, Length(ProjPath) - Length(Ext)) + '.eda-rewrite' + Ext;
+    If FileExists(Via) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COPY_EXISTS',
+            'A file is already at ' + Via + '. It may be the copy an earlier '
+            + 'rewrite kept; check it and move it away before rewriting again.');
+        Exit;
+    End;
+    Kind := '';
+    Try Kind := ProjDoc.Kind; Except Kind := ''; End;
+    If Kind = '' Then Kind := 'PCBPROJECT';
+    Problem := '';
+    Saved := False;
+    Deleted := False;
+    CopyKept := False;
+    ViaSaved := False;
+    Try ViaSaved := ProjDoc.DoSafeChangeFileNameAndSave(Via, Kind); Except ViaSaved := False; End;
+    ViaLoaded := False;
+    ViaList := '';
+    If ViaSaved And FileExists(Via) Then ViaList := ProjectFileDocumentList(Via, ViaLoaded);
+    ViaCount := ProjectListCount(ViaList);
+    If Not (ViaSaved And FileExists(Via)) Then
+        Problem := 'Altium did not write the copy'
+    Else If Not ViaLoaded Then
+        Problem := 'Altium could not load the copy to check it, so the original was kept'
+    Else If ViaCount <> Expected Then
+        Problem := 'the copy lists ' + IntToStr(ViaCount) + ' documents, not '
+            + IntToStr(Expected) + ', so the original was kept'
+    Else
+    Begin
+        DeleteFile(ProjPath);
+        Deleted := Not FileExists(ProjPath);
+        If Not Deleted Then
+            Problem := 'the original could not be deleted, so it was saved over';
+    End;
+    { Back under its own name in every case: the open project must not stay  }
+    { pointed at the copy.                                                    }
+    Try Saved := ProjDoc.DoSafeChangeFileNameAndSave(ProjPath, Kind); Except Saved := False; End;
+    Loaded := False;
+    List := ProjectFileDocumentList(ProjPath, Loaded);
+    Count := ProjectListCount(List);
+    If Not Loaded Then Count := -1;
+    If FileExists(Via) Then
+    Begin
+        If Saved And FileExists(ProjPath) And ((Not Deleted) Or (Count = Expected)) Then
+            DeleteFile(Via)
+        Else
         Begin
-            For I := 0 To SL.Count - 1 Do
+            CopyKept := True;
+            If Problem = '' Then
             Begin
-                Line := Trim(SL.Strings[I]);
-                If UpperCase(Copy(Line, 1, 13)) <> 'DOCUMENTPATH=' Then Continue;
-                Value := Copy(Line, 14, Length(Line));
-                If UpperCase(ExtractFileName(Value)) = Want Then
-                Begin
-                    Result := Line;
-                    Exit;
-                End;
+                If Not FileExists(ProjPath) Then
+                    Problem := 'Altium did not write the project file back; the '
+                        + 'clean copy is at ' + Via
+                Else If Not Loaded Then
+                    Problem := 'Altium could not load the project file to check '
+                        + 'it; the clean copy is at ' + Via
+                Else
+                    Problem := 'the project file lists ' + IntToStr(Count)
+                        + ' documents, not ' + IntToStr(Expected)
+                        + '; the clean copy is at ' + Via;
             End;
         End;
-    Finally
-        SL.Free;
     End;
+    Result := BuildSuccessResponse(RequestId, '{"rewritten":'
+        + BoolToJsonStr((Problem = '') And Saved And (Count = Expected))
+        + ',"saved":' + BoolToJsonStr(Saved)
+        + ',"copy_kept":' + BoolToJsonStr(CopyKept)
+        + ',"copy_path":"' + EscapeJsonString(Via) + '"'
+        + ',"project_path":"' + EscapeJsonString(ProjPath) + '"'
+        + ',"file_documents":' + ProjectListJson(List, Loaded)
+        + ',"reason":"' + EscapeJsonString(Problem) + '"}');
 End;
 
 { Remove a document FROM A PROJECT. It does not delete the file.             }
 {                                                                             }
-{ THE PROJECT FILE IS WRITTEN AND READ BACK. Removal changed the project in  }
-{ memory only, so the .PrjPcb kept the [DocumentN] entry and the document    }
-{ was back after a reopen (issue #94). The project is saved, unless          }
-{ save_project is false, and the file itself is checked for the entry.       }
+{ THE PROJECT FILE IS WRITTEN AND LOADED BACK. Removal changes the project   }
+{ in memory only; until the .PrjPcb is saved it keeps the [DocumentN] entry  }
+{ and the document is back after a reopen. The project is saved, unless      }
+{ save_project is false, and Altium loads a copy of the saved file to see    }
+{ whether it still holds the document.                                       }
 {                                                                             }
-{ This used to run WorkspaceManager:CloseObject on the document, which closes }
-{ the editor WINDOW and leaves project membership untouched. Measured: the    }
-{ call reported success, raised an Unsaved Changes prompt, and the .PrjPcb    }
-{ still carried the DocumentPath afterwards. The right call is the mirror of  }
-{ the one Proj_AddDocument uses, DM_RemoveSourceDocument, and it is confirmed }
-{ by three independent scripts in reference/.                                 }
+{ WorkspaceManager:CloseObject closes the editor WINDOW and leaves project    }
+{ membership untouched. The removal is DM_RemoveSourceDocument, the mirror of }
+{ the call Proj_AddDocument uses.                                             }
 {                                                                             }
 { Membership is re-read afterwards, because the removal is the whole point of }
 { the tool and "I issued it" is not the same as "it happened".                }
 Function Proj_RemoveDocument(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, DocumentPath, DocPath, ProjPath, Entry, Members : String;
+    ProjectPath, DocumentPath, DocPath, ProjPath, Entry, Members, FileDocs, FileList : String;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
     I : Integer;
-    StillMember, WasMember, ProjSaved : Boolean;
+    StillMember, WasMember, ProjSaved, FileLoaded : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     DocumentPath := ExtractJsonValue(Params, 'document_path');
@@ -770,8 +1050,8 @@ Begin
                 Try Project.DM_RemoveSourceDocument(DocumentPath); Except End;
 
                 { Members as Altium holds them now. The reply carries them so }
-                { the server can take leftover sections out of the file: only }
-                { sections past this count, and only when the rest match it.  }
+                { the server can tell whether the file lists more than these  }
+                { and have project.rewrite_file write it fresh.               }
                 StillMember := False;
                 Members := '';
                 For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
@@ -805,14 +1085,30 @@ Begin
                 { it rewrites [Document1]..[DocumentN] for the new count and   }
                 { leaves every section past N in the file, so a removal leaves }
                 { an entry (or a shifted duplicate) behind and a reopen loads  }
-                { it again. Saving more does not help. The file is read back,  }
-                { and a leftover is reported with the members, for the server  }
-                { to take out (eda_agent.prjpcb); never called removed here.   }
+                { it again. Saving more does not help. Altium loads the saved  }
+                { file (ProjectFileDocumentList), and the reply carries what   }
+                { it holds beside the members, for the server to call          }
+                { project.rewrite_file (eda_agent.prjpcb); never called        }
+                { removed here.                                                }
                 If ExtractJsonValue(Params, 'save_project') <> 'false' Then
                     ProjSaved := SaveProjectFile(Project);
-                Entry := ProjectFileEntryFor(ProjPath, DocumentPath);
+                FileLoaded := False;
+                FileList := ProjectFileDocumentList(ProjPath, FileLoaded);
+                Entry := ProjectListEntryFor(FileList, DocumentPath);
+                FileDocs := ProjectListJson(FileList, FileLoaded);
 
-                If Entry <> '' Then
+                If Not FileLoaded Then
+                    Result := BuildSuccessResponse(RequestId,
+                        '{"success":true,"removed":true,"project_saved":'
+                        + BoolToJsonStr(ProjSaved) + ',"in_project_file":null'
+                        + ',"project_file_checked":false'
+                        + ',"document_path":"' + EscapeJsonString(DocumentPath)
+                        + '","project_path":"' + EscapeJsonString(ProjPath)
+                        + '","reason":"removed from the project in Altium. The '
+                        + 'saved project file could not be checked, because '
+                        + 'Altium did not load a copy of it; reopen the project '
+                        + 'to confirm the document stays out."}')
+                Else If Entry <> '' Then
                     Result := BuildSuccessResponse(RequestId,
                         '{"success":false,"removed":true,"project_saved":'
                         + BoolToJsonStr(ProjSaved) + ',"in_project_file":true'
@@ -820,6 +1116,7 @@ Begin
                         + '","document_path":"' + EscapeJsonString(DocumentPath)
                         + '","project_path":"' + EscapeJsonString(ProjPath)
                         + '","members":[' + Members + ']'
+                        + ',"file_documents":' + FileDocs
                         + ',"reason":"removed in memory, but the project file '
                         + 'on disk still lists it, so it comes back when the '
                         + 'project is reopened. Altium rewrites only as many '
@@ -831,7 +1128,8 @@ Begin
                         + BoolToJsonStr(ProjSaved) + ',"in_project_file":false'
                         + ',"document_path":"' + EscapeJsonString(DocumentPath)
                         + '","project_path":"' + EscapeJsonString(ProjPath)
-                        + '","members":[' + Members + ']}');
+                        + '","members":[' + Members + ']'
+                        + ',"file_documents":' + FileDocs + '}');
             End;
         End
         Else
@@ -895,6 +1193,10 @@ End;
 {                                                                             }
 { Both paths are now followed by a re-read of DM_Parameters, and the reply    }
 { carries what was READ, not what was asked for.                              }
+{                                                                             }
+{ The PROJECT FILE is what is saved, and only it: adding a parameter does not }
+{ mark the project modified, so saving the modified documents would leave it  }
+{ out of the .PrjPcb and write documents nobody asked to save.                }
 Function Proj_SetParameter(Params : String; RequestId : String) : String;
 Var
     ProjectPath, ParamName, ParamValue, ReadBack : String;
@@ -902,7 +1204,7 @@ Var
     Project : IProject;
     Param : IParameter;
     I : Integer;
-    Found, Verified : Boolean;
+    Found, Verified, FileSaved : Boolean;
 Begin
     ParamName := ExtractJsonValue(Params, 'name');
     ParamValue := ExtractJsonValue(Params, 'value');
@@ -933,6 +1235,14 @@ Begin
     End;
 
     ProjectPath := Project.DM_ProjectFullPath;
+    { Free Documents, in focus behind a loose document, has no file. }
+    If Not FileExists(ProjectPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND',
+            'The project in focus is "' + ProjectPath
+            + '", not a project file; pass project_path. Nothing was written.');
+        Exit;
+    End;
 
     { Update in place if it is already there. }
     Found := False;
@@ -943,7 +1253,10 @@ Begin
             Param := Project.DM_Parameters(I);
             If Param.DM_Name = ParamName Then
             Begin
-                Param.DM_Value := ParamValue;
+                { DM_Value is a getter; assigning it stops the script with a }
+                { blank "Error" box no Try/Except catches. DM_SetValue is    }
+                { the setter, as Prj-Parameters.pas uses it.                 }
+                Param.DM_SetValue(ParamValue);
                 Found := True;
                 Break;
             End;
@@ -955,8 +1268,8 @@ Begin
         Project.DM_EndUpdate;
     End;
 
-    { Persist, then READ IT BACK. }
-    SaveProjectMembers(Project);
+    { Persist the project file, then READ IT BACK. }
+    FileSaved := SaveProjectFile(Project);
 
     Verified := False;
     ReadBack := '';
@@ -976,6 +1289,7 @@ Begin
             '{"success":true,"name":"' + EscapeJsonString(ParamName)
             + '","value":"' + EscapeJsonString(ReadBack)
             + '","created":' + BoolToJsonStr(Not Found)
+            + ',"project_file_saved":' + BoolToJsonStr(FileSaved)
             + ',"verified":true,"project_path":"'
             + EscapeJsonString(ProjectPath) + '"}')
     Else
@@ -1077,7 +1391,20 @@ End;
 { skipped_nil counts documents, components and pins the model returned as   }
 { Nil, so a short list is not mistaken for the whole design. Proj_GetBOM    }
 { reports the same two.                                                      }
+{                                                                              }
+{ A multi-part symbol placed on several sheets is one compiled component per }
+{ sheet, each listing the pins of the whole device, and a pin whose part is  }
+{ on another sheet reads its net as '?'. So a pin is listed once: a first    }
+{ pass notes the pins some copy names a net for, and the second lists each   }
+{ pin one time, from a copy that names its net when one does (#296).         }
 {..............................................................................}
+
+{ A net name that says the pin has a net: not empty and not the '?' a copy }
+{ of a multi-part symbol reads for a pin of a part on another sheet.       }
+Function IsNamedNet(NetName : String) : Boolean;
+Begin
+    Result := (NetName <> '') And (NetName <> '?');
+End;
 
 Function Proj_GetNets(Params : String; RequestId : String) : String;
 Var
@@ -1087,10 +1414,11 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, Count, Limit, DocCount, Skipped : Integer;
+    I, J, K, Pass, Count, Limit, DocCount, Skipped, Repeats : Integer;
     UsePhysical, LimitHit : Boolean;
-    Data, CompDesig, NetName : String;
+    Data, CompDesig, NetName, Key : String;
     First : Boolean;
+    Named, Listed : TStringList;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     FilterComp := ExtractJsonValue(Params, 'component');
@@ -1124,47 +1452,89 @@ Begin
     First := True;
     Count := 0;
     Skipped := 0;
+    Repeats := 0;
     LimitHit := False;
-
-    GetCompiledDocs(Project, DocCount, UsePhysical);
-    For I := 0 To DocCount - 1 Do
-    Begin
-        If LimitHit Then Break;
-        Doc := GetCompiledDoc(Project, I, UsePhysical);
-        If Doc = Nil Then Begin Inc(Skipped); Continue; End;
-
-        For J := 0 To Doc.DM_ComponentCount - 1 Do
+    Named := TStringList.Create;
+    Named.Sorted := True;
+    Named.Duplicates := dupIgnore;
+    Listed := TStringList.Create;
+    Listed.Sorted := True;
+    Listed.Duplicates := dupIgnore;
+    Try
+        GetCompiledDocs(Project, DocCount, UsePhysical);
+        For Pass := 1 To 2 Do
         Begin
-            If LimitHit Then Break;
-            Comp := Doc.DM_Components(J);
-            If Comp = Nil Then Begin Inc(Skipped); Continue; End;
-
-            CompDesig := Comp.DM_PhysicalDesignator;
-            If (FilterComp <> '') And (CompDesig <> FilterComp) Then Continue;
-
-            For K := 0 To Comp.DM_PinCount - 1 Do
+            For I := 0 To DocCount - 1 Do
             Begin
-                Pin := Comp.DM_Pins(K);
-                If Pin = Nil Then Begin Inc(Skipped); Continue; End;
-
-                NetName := Pin.DM_FlattenedNetName;
-                If (FilterNet <> '') And (NetName <> FilterNet) Then Continue;
-                If Count >= Limit Then
+                If LimitHit Then Break;
+                Doc := GetCompiledDoc(Project, I, UsePhysical);
+                If Doc = Nil Then
                 Begin
-                    LimitHit := True;
-                    Break;
+                    If Pass = 2 Then Inc(Skipped);
+                    Continue;
                 End;
 
-                If Not First Then Data := Data + ',';
-                First := False;
+                For J := 0 To Doc.DM_ComponentCount - 1 Do
+                Begin
+                    If LimitHit Then Break;
+                    Comp := Doc.DM_Components(J);
+                    If Comp = Nil Then
+                    Begin
+                        If Pass = 2 Then Inc(Skipped);
+                        Continue;
+                    End;
 
-                Data := Data + '{"component":"' + EscapeJsonString(CompDesig) + '"';
-                Data := Data + ',"pin":"' + EscapeJsonString(Pin.DM_PinNumber) + '"';
-                Data := Data + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
-                Data := Data + ',"net":"' + EscapeJsonString(NetName) + '"}';
-                Inc(Count);
+                    CompDesig := Comp.DM_PhysicalDesignator;
+                    If (FilterComp <> '') And (CompDesig <> FilterComp) Then Continue;
+
+                    For K := 0 To Comp.DM_PinCount - 1 Do
+                    Begin
+                        Pin := Comp.DM_Pins(K);
+                        If Pin = Nil Then
+                        Begin
+                            If Pass = 2 Then Inc(Skipped);
+                            Continue;
+                        End;
+
+                        NetName := Pin.DM_FlattenedNetName;
+                        Key := CompDesig + '|' + Pin.DM_PinNumber;
+                        If Pass = 1 Then
+                        Begin
+                            If IsNamedNet(NetName) Then Named.Add(Key);
+                            Continue;
+                        End;
+
+                        { Once per pin, from a copy naming its net when one does. }
+                        If (Listed.IndexOf(Key) >= 0)
+                            Or ((Not IsNamedNet(NetName)) And (Named.IndexOf(Key) >= 0)) Then
+                        Begin
+                            Inc(Repeats);
+                            Continue;
+                        End;
+                        If (FilterNet <> '') And (NetName <> FilterNet) Then Continue;
+                        { A limit of 0 or less is no limit: every pin. }
+                        If (Limit > 0) And (Count >= Limit) Then
+                        Begin
+                            LimitHit := True;
+                            Break;
+                        End;
+                        Listed.Add(Key);
+
+                        If Not First Then Data := Data + ',';
+                        First := False;
+
+                        Data := Data + '{"component":"' + EscapeJsonString(CompDesig) + '"';
+                        Data := Data + ',"pin":"' + EscapeJsonString(Pin.DM_PinNumber) + '"';
+                        Data := Data + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
+                        Data := Data + ',"net":"' + EscapeJsonString(NetName) + '"}';
+                        Inc(Count);
+                    End;
+                End;
             End;
         End;
+    Finally
+        Named.Free;
+        Listed.Free;
     End;
 
     Data := Data + ']';
@@ -1172,11 +1542,12 @@ Begin
         + ',"count":' + IntToStr(Count)
         + ',"limit":' + IntToStr(Limit)
         + ',"limit_hit":' + BoolToJsonStr(LimitHit)
+        + ',"repeats_skipped":' + IntToStr(Repeats)
         + ',"skipped_nil":' + IntToStr(Skipped) + '}');
 End;
 
 {..............................................................................}
-{ BOM export from compiled project                                           }
+{ BOM export from compiled project                                          }
 {..............................................................................}
 
 Function Proj_GetBOM(Params : String; RequestId : String) : String;
@@ -1187,10 +1558,11 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, Count, Limit, DocCount, Skipped : Integer;
+    I, J, K, Count, Limit, DocCount, Skipped, Repeats : Integer;
     UsePhysical, LimitHit : Boolean;
     Data, CompDesig, CompComment, CompFP, CompLib, PinList : String;
     First, FirstPin : Boolean;
+    Listed : TStringList;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 1000);
@@ -1208,7 +1580,13 @@ Begin
     First := True;
     Count := 0;
     Skipped := 0;
+    Repeats := 0;
     LimitHit := False;
+    { A multi-part symbol on several sheets is a compiled component on each }
+    { of them under one designator: one BOM row, not one per sheet (#296). }
+    Listed := TStringList.Create;
+    Listed.Sorted := True;
+    Listed.Duplicates := dupIgnore;
 
     GetCompiledDocs(Project, DocCount, UsePhysical);
     For I := 0 To DocCount - 1 Do
@@ -1223,12 +1601,18 @@ Begin
             Comp := Doc.DM_Components(J);
             If Comp = Nil Then Begin Inc(Skipped); Continue; End;
 
+            CompDesig := Comp.DM_PhysicalDesignator;
+            If Listed.IndexOf(CompDesig) >= 0 Then
+            Begin
+                Inc(Repeats);
+                Continue;
+            End;
             If Count >= Limit Then
             Begin
                 LimitHit := True;
                 Break;
             End;
-            CompDesig := Comp.DM_PhysicalDesignator;
+            Listed.Add(CompDesig);
             CompComment := Comp.DM_Comment;
             CompFP := Comp.DM_Footprint;
             CompLib := Comp.DM_LibraryReference;
@@ -1258,11 +1642,13 @@ Begin
         End;
     End;
 
+    Listed.Free;
     Data := Data + ']';
     Result := BuildSuccessResponse(RequestId, '{"components":' + Data
         + ',"count":' + IntToStr(Count)
         + ',"limit":' + IntToStr(Limit)
         + ',"limit_hit":' + BoolToJsonStr(LimitHit)
+        + ',"repeats_skipped":' + IntToStr(Repeats)
         + ',"skipped_nil":' + IntToStr(Skipped) + '}');
 End;
 
@@ -2729,22 +3115,124 @@ Begin
 End;
 
 {..............................................................................}
+{ HierItemKey - where a compiled port or sheet entry sits: its sheet file,   }
+{ kind and location in internal units. The same item on a sheet's logical   }
+{ document and on each of its physical documents (one per channel) shares   }
+{ the key.                                                                    }
+{..............................................................................}
+Function HierItemKey(FileName : String; Kind : String; Item : INetItem) : String;
+Var
+    X, Y : Integer;
+Begin
+    X := 0; Y := 0;
+    Try X := Item.DM_LocationX; Except End;
+    Try Y := Item.DM_LocationY; Except End;
+    Result := LowerCase(FileName) + '|' + Kind + '|' + IntToStr(X) + '|' + IntToStr(Y);
+End;
+
+{..............................................................................}
+{ HierPhysicalNets - each port's and sheet entry's net on every physical     }
+{ document. MEASURED on AD 25.8.1: DM_FlattenedNetName read through a        }
+{ sheet's LOGICAL document only repeats the net's name on that sheet; read  }
+{ through the PHYSICAL documents (one per sheet, one per channel of a       }
+{ repeated sheet) it is the name the net takes across the project, the     }
+{ one Altium's Properties panel calls the physical net (see Main.pas,       }
+{ GetCompiledDocs). Keys get HierItemKey; Vals the JSON of each copy        }
+{ (instance, net), joined by ','.                                           }
+{..............................................................................}
+Procedure HierPhysicalNets(Project : IProject; Keys : TStringList; Vals : TStringList;
+    Var Misses : Integer);
+Var
+    Physical : IDocument;
+    Sym : ISheetSymbol;
+    Item : INetItem;
+    Count, I, J, K, At : Integer;
+    FileName, Instance, Net, Key, OneCopy : String;
+Begin
+    Count := 0;
+    Try Count := Project.DM_PhysicalDocumentCount; Except Count := 0; End;
+    For I := 0 To Count - 1 Do
+    Begin
+        Physical := Nil;
+        Try Physical := Project.DM_PhysicalDocuments(I); Except Physical := Nil; End;
+        If Physical = Nil Then Continue;
+        FileName := ''; Instance := '';
+        Try FileName := Physical.DM_FileName; Except Inc(Misses); End;
+        Try Instance := Physical.DM_PhysicalInstanceName; Except Inc(Misses); End;
+        For J := 0 To Physical.DM_PortCount + Physical.DM_SheetSymbolCount - 1 Do
+        Begin
+            For K := 0 To 1023 Do
+            Begin
+                Item := Nil;
+                If J < Physical.DM_PortCount Then
+                Begin
+                    If K > 0 Then Break;
+                    Try Item := Physical.DM_Ports(J); Except Item := Nil; End;
+                    Key := 'port';
+                End
+                Else
+                Begin
+                    Sym := Nil;
+                    Try Sym := Physical.DM_SheetSymbols(J - Physical.DM_PortCount); Except Sym := Nil; End;
+                    If Sym = Nil Then Break;
+                    If K >= Sym.DM_SheetEntryCount Then Break;
+                    Try Item := Sym.DM_SheetEntries(K); Except Item := Nil; End;
+                    Key := 'entry';
+                End;
+                If Item = Nil Then Continue;
+                Net := '';
+                Try Net := Item.DM_FlattenedNetName; Except Inc(Misses); End;
+                Key := HierItemKey(FileName, Key, Item);
+                OneCopy := JsonObj(JsonStr('instance', Instance) + ',' + JsonStr('net', Net));
+                At := Keys.IndexOf(Key);
+                If At < 0 Then
+                Begin
+                    Keys.Add(Key);
+                    Vals.Add(OneCopy);
+                End
+                Else
+                    Vals.Strings[At] := Vals.Strings[At] + ',' + OneCopy;
+            End;
+        End;
+    End;
+End;
+
+{..............................................................................}
 { HierItemJson - a compiled port or sheet entry: its name and direction.     }
 { The name is DM_PortName, else DM_NetName; both are read, since which one  }
-{ an entry carries is the compiler's choice.                                 }
+{ an entry carries is the compiler's choice. port_name is the raw           }
+{ DM_PortName (empty on a sheet entry). Its two net names: net, the net's   }
+{ name on the item's own sheet (DM_NetName), and physical, the name the net }
+{ takes across the project on each physical copy of the sheet (instance,    }
+{ net) from HierPhysicalNets. They differ when a name from another sheet    }
+{ wins: with "Higher Level Names Take Priority" on, a label above the sheet }
+{ symbol renames the net below. x / y in mils tell apart several items of   }
+{ one name on a sheet.                                                       }
 {..............................................................................}
-Function HierItemJson(Item : INetItem; Var Misses : Integer) : String;
+Function HierItemJson(Item : INetItem; FileName : String; Kind : String;
+    Keys : TStringList; Vals : TStringList; Var Misses : Integer) : String;
 Var
-    Name, NetName, Electric : String;
+    Name, PortName, NetName, Electric, Copies : String;
+    X, Y, At : Integer;
 Begin
-    Name := ''; NetName := ''; Electric := '';
-    Try Name := Item.DM_PortName; Except Inc(Misses); End;
+    Name := ''; PortName := ''; NetName := ''; Electric := ''; Copies := '';
+    X := 0; Y := 0;
+    Try PortName := Item.DM_PortName; Except Inc(Misses); End;
     Try NetName := Item.DM_NetName; Except Inc(Misses); End;
     Try Electric := Item.DM_ElectricalString; Except Inc(Misses); End;
+    Try X := Item.DM_LocationX; Except Inc(Misses); End;
+    Try Y := Item.DM_LocationY; Except Inc(Misses); End;
+    At := Keys.IndexOf(HierItemKey(FileName, Kind, Item));
+    If At >= 0 Then Copies := Vals.Strings[At];
+    Name := PortName;
     If Name = '' Then Name := NetName;
     Result := JsonObj(JsonStr('name', Name) + ','
+        + JsonStr('port_name', PortName) + ','
         + JsonStr('net', NetName) + ','
-        + JsonStr('io', Electric));
+        + JsonRaw('physical', '[' + Copies + ']') + ','
+        + JsonStr('io', Electric) + ','
+        + JsonFloat('x', X / 10000) + ','
+        + JsonFloat('y', Y / 10000));
 End;
 
 {..............................................................................}
@@ -2763,6 +3251,7 @@ Var
     ProjectPath, Items, TopName, FileName, Kind, Parents, Ports, Syms, Entries : String;
     SymFile, SymName, PName : String;
     I, J, K, Misses, Children, Sheets : Integer;
+    Keys, Vals : TStringList;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     Workspace := GetWorkspace;
@@ -2772,6 +3261,10 @@ Begin
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
     SmartCompile(Project);
     Misses := 0;
+    Keys := TStringList.Create;
+    Vals := TStringList.Create;
+    Try
+    HierPhysicalNets(Project, Keys, Vals, Misses);
     TopName := '';
     TopDoc := Nil;
     Try TopDoc := Project.DM_TopLevelLogicalDocument; Except Inc(Misses); End;
@@ -2814,7 +3307,7 @@ Begin
                 Try Item := Doc.DM_Ports(J); Except Item := Nil; End;
                 If Item = Nil Then Continue;
                 If Ports <> '' Then Ports := Ports + ',';
-                Ports := Ports + HierItemJson(Item, Misses);
+                Ports := Ports + HierItemJson(Item, FileName, 'port', Keys, Vals, Misses);
             End;
         Except Inc(Misses); End;
 
@@ -2837,7 +3330,7 @@ Begin
                         Try Item := Sym.DM_SheetEntries(K); Except Item := Nil; End;
                         If Item = Nil Then Continue;
                         If Entries <> '' Then Entries := Entries + ',';
-                        Entries := Entries + HierItemJson(Item, Misses);
+                        Entries := Entries + HierItemJson(Item, FileName, 'entry', Keys, Vals, Misses);
                     End;
                 Except Inc(Misses); End;
                 If Syms <> '' Then Syms := Syms + ',';
@@ -2859,6 +3352,10 @@ Begin
         + JsonInt('sheet_count', Sheets) + ','
         + JsonInt('read_errors', Misses) + ','
         + JsonRaw('sheets', '[' + Items + ']')));
+    Finally
+        Keys.Free;
+        Vals.Free;
+    End;
 End;
 
 {..............................................................................}
@@ -3162,11 +3659,14 @@ End;
 { generated is true only when a new file is at output_path afterwards, so a  }
 { build where the call does nothing says so and proj_export_step falls back  }
 { to the dialog route.                                                        }
-{ Params: output_path (required), format (default 0)                          }
+{ board_path names the board and brings it to the front first, in this same  }
+{ command: the exporter writes the front view, and another session's command }
+{ can put its own document in front between two of ours.                     }
+{ Params: output_path (required), format (default 0), board_path (optional)  }
 {..............................................................................}
 Function Proj_ExportSTEPApi(Params : String; RequestId : String) : String;
 Var
-    OutputPath, Problem, NotTaken : String;
+    OutputPath, Problem, NotTaken, BoardPath : String;
     Board : IPCB_Board;
     Exporter : IPCB_Board3DModelExporter;
     Proj : IProject;
@@ -3179,10 +3679,15 @@ Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'output_path is required');
         Exit;
     End;
-    Board := GetPCBBoardAnywhere(0);
+    BoardPath := ExtractJsonValue(Params, 'board_path');
+    Board := ResolvePCBBoard(BoardPath);
     If Board = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is open');
+        If BoardPath = '' Then
+            Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is open')
+        Else
+            Result := BuildErrorResponse(RequestId, 'NO_PCB', BoardPath
+                + ' is not open as a board, or did not come to the front');
         Exit;
     End;
     Exporter := Nil;
@@ -3469,17 +3974,53 @@ Begin
 End;
 
 {..............................................................................}
-{ List output containers from an open .OutJob document                        }
-{ The OutJob file is an INI format, parse sections for containers.           }
-{ Params: outjob_path (optional, uses first open OutJob if omitted)          }
+{ THE OUTJOB IS READ THROUGH ITS OWN DOCUMENT. An OutJob's server document,  }
+{ held in a variable of type IWSM_OutputJobDocument, answers                 }
+{ GetState_OutputMediumCount and GetState_OutputMedium (each container's     }
+{ name, type and output path) and GetState_MediumOutputer (the outputs a     }
+{ container writes). MEASURED on AD 26.11.1.5, matching the outputs the      }
+{ OutJob enables. The object IWorkspace.DM_GetOutputJobDocumentByPath gives  }
+{ has none of these members.                                                 }
+{..............................................................................}
+
+{ An OutJob's server document, opened if it is not. Nil when it cannot be.   }
+Function OutJobServerDocument(Path : String) : IServerDocument;
+Begin
+    Result := Nil;
+    Try Result := Client.GetDocumentByPath(Path); Except Result := Nil; End;
+    If Result = Nil Then
+    Begin
+        Try Result := Client.OpenDocument('OUTPUTJOB', Path); Except Result := Nil; End;
+    End;
+End;
+
+{ The folder a container writes to. A PDF container's output path names its  }
+{ file, so its folder is taken.                                               }
+Function MediumOutputDir(M : IOutputMedium) : String;
+Begin
+    Result := '';
+    Try Result := M.GetState_OutputPath; Except Result := ''; End;
+    If Result = '' Then Exit;
+    If ExtractFileExt(Result) <> '' Then
+        Result := ExtractFilePath(Result)
+    Else If Copy(Result, Length(Result), 1) <> '\' Then
+        Result := Result + '\';
+End;
+
+{..............................................................................}
+{ List the output containers of an OutJob, through Altium's OutJob API.      }
+{ Params: outjob_path (optional, uses the focused project's first OutJob).    }
 {..............................................................................}
 
 Function Proj_GetOutJobContainers(Params : String; RequestId : String) : String;
 Var
-    OutJobPath, S : String;
-    IniFile : TIniFile;
-    ContainerName, ContainerType : String;
-    G, J : Integer;
+    OutJobPath : String;
+    SDoc : IServerDocument;
+    OJ : IWSM_OutputJobDocument;
+    M : IOutputMedium;
+    O : IOutputer;
+    ContainerName, ContainerType, Outputs, Names, OutPath : String;
+    G, J, N, K : Integer;
     Data : String;
     First : Boolean;
     Workspace : IWorkspace;
@@ -3524,38 +4065,59 @@ Begin
         Exit;
     End;
 
-    { OutJob files are INI format, parse OutputGroup sections }
+    SDoc := OutJobServerDocument(OutJobPath);
+    If SDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_OPENED',
+            'Altium could not open the OutJob: ' + OutJobPath);
+        Exit;
+    End;
+    OJ := SDoc;
     Data := '[';
     First := True;
-    IniFile := TIniFile.Create(OutJobPath);
-    Try
-        G := 1;
-        While True Do
+    N := 0;
+    Try N := OJ.GetState_OutputMediumCount; Except N := 0; End;
+    For G := 0 To N - 1 Do
+    Begin
+        M := Nil;
+        Try M := OJ.GetState_OutputMedium(G); Except M := Nil; End;
+        If M = Nil Then Continue;
+        ContainerName := '';
+        ContainerType := '';
+        OutPath := '';
+        Try ContainerName := M.GetState_Name; Except End;
+        Try ContainerType := M.GetState_TypeString; Except End;
+        Try OutPath := M.GetState_OutputPath; Except End;
+        { The outputs this container writes: Altium's generator name of each, }
+        { and the name the OutJob gives it.                                    }
+        Outputs := '';
+        Names := '';
+        K := 0;
+        Try K := OJ.GetState_MediumOutputersCount(M); Except K := 0; End;
+        For J := 0 To K - 1 Do
         Begin
-            S := 'OutputGroup' + IntToStr(G);
-            J := 1;
-            ContainerName := IniFile.ReadString(S, 'OutputMedium1', '');
-            If ContainerName = '' Then Break;  { no more groups }
-
-            While True Do
+            O := Nil;
+            Try O := OJ.GetState_MediumOutputer(M, J); Except O := Nil; End;
+            If O <> Nil Then
             Begin
-                ContainerName := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J), '');
-                If ContainerName = '' Then Break;
-
-                ContainerType := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J) + '_Type', '');
-
-                If Not First Then Data := Data + ',';
-                First := False;
-                Data := Data + '{"name":"' + EscapeJsonString(ContainerName) + '"';
-                Data := Data + ',"type":"' + EscapeJsonString(ContainerType) + '"';
-                Data := Data + ',"group":' + IntToStr(G) + '}';
-
-                Inc(J);
+                If Outputs <> '' Then
+                Begin
+                    Outputs := Outputs + ',';
+                    Names := Names + ',';
+                End;
+                Outputs := Outputs + '"' + EscapeJsonString(O.DM_GeneratorName) + '"';
+                Names := Names + '"' + EscapeJsonString(O.DM_ViewName) + '"';
             End;
-            Inc(G);
         End;
-    Finally
-        IniFile.Free;
+        If Not First Then Data := Data + ',';
+        First := False;
+        Data := Data + '{"name":"' + EscapeJsonString(ContainerName) + '"'
+            + ',"type":"' + EscapeJsonString(ContainerType) + '"'
+            + ',"outputs":[' + Outputs + ']'
+            + ',"output_names":[' + Names + ']'
+            + ',"output_path":"' + EscapeJsonString(OutPath) + '"'
+            + ',"output_dir":"' + EscapeJsonString(MediumOutputDir(M)) + '"'
+            + ',"index":' + IntToStr(G) + '}';
     End;
     Data := Data + ']';
 
@@ -3616,10 +4178,11 @@ End;
 
 Function Proj_RunOutJob(Params : String; RequestId : String) : String;
 Var
-    OutJobPath, ContainerName, S : String;
-    IniFile : TIniFile;
-    FoundContainerName, ContainerType, RelativePath, OutputDir : String;
-    G, J : Integer;
+    OutJobPath, ContainerName : String;
+    OJ : IWSM_OutputJobDocument;
+    M : IOutputMedium;
+    FoundContainerName, ContainerType, OutputDir : String;
+    G, N : Integer;
     Found, OutJobOpened, OutJobActive, RunRaised : Boolean;
     ClosedOthers : Integer;
     OutJobDoc : IServerDocument;
@@ -3703,38 +4266,30 @@ Begin
     Except
     End;
 
-    { Parse the INI to find the container and its type }
+    { The container, its type and its folder, from Altium's OutJob API. }
     Found := False;
     ContainerType := '';
-    RelativePath := '';
-    IniFile := TIniFile.Create(OutJobPath);
-    Try
-        G := 1;
-        While Not Found Do
+    OutputDir := '';
+    If OutJobDoc <> Nil Then
+    Begin
+        OJ := OutJobDoc;
+        N := 0;
+        Try N := OJ.GetState_OutputMediumCount; Except N := 0; End;
+        For G := 0 To N - 1 Do
         Begin
-            S := 'OutputGroup' + IntToStr(G);
-            J := 1;
-            FoundContainerName := IniFile.ReadString(S, 'OutputMedium1', '');
-            If FoundContainerName = '' Then Break;
-
-            While True Do
+            M := Nil;
+            Try M := OJ.GetState_OutputMedium(G); Except M := Nil; End;
+            If M = Nil Then Continue;
+            FoundContainerName := '';
+            Try FoundContainerName := M.GetState_Name; Except End;
+            If FoundContainerName = ContainerName Then
             Begin
-                FoundContainerName := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J), '');
-                If FoundContainerName = '' Then Break;
-
-                If FoundContainerName = ContainerName Then
-                Begin
-                    ContainerType := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J) + '_Type', '');
-                    RelativePath := IniFile.ReadString('PublishSettings', 'OutputBasePath' + IntToStr(J), '');
-                    Found := True;
-                    Break;
-                End;
-                Inc(J);
+                Try ContainerType := M.GetState_TypeString; Except End;
+                OutputDir := MediumOutputDir(M);
+                Found := True;
+                Break;
             End;
-            Inc(G);
         End;
-    Finally
-        IniFile.Free;
     End;
 
     If Not Found Then
@@ -3748,45 +4303,29 @@ Begin
     { stopped the script; it is caught and reported, and the folder decides. }
     RunRaised := False;
     Try
-        If ContainerType = 'Publish' Then
+        { A PDF container publishes; every other kind generates. The OutJob }
+        { gives the container its folder, so none is passed.               }
+        If UpperCase(ContainerType) = 'PDF' Then
         Begin
             ResetParameters;
             AddStringParameter('Action', 'PublishToPDF');
             AddStringParameter('OutputMedium', ContainerName);
             AddStringParameter('ObjectKind', 'OutputBatch');
-            If RelativePath <> '' Then AddStringParameter('OutputBasePath', RelativePath);
             AddStringParameter('DisableDialog', 'True');
             RunProcess('WorkspaceManager:Print');
         End
         Else
         Begin
-            { Default: GeneratedFiles and others use GenerateReport }
             ResetParameters;
             AddStringParameter('Action', 'Run');
             AddStringParameter('OutputMedium', ContainerName);
             AddStringParameter('ObjectKind', 'OutputBatch');
-            If RelativePath <> '' Then AddStringParameter('OutputBasePath', RelativePath);
             RunProcess('WorkspaceManager:GenerateReport');
         End;
     Except
         RunRaised := True;
     End;
 
-    { Resolve the OutJob's configured output directory so callers can pick }
-    { up the produced files without having to re-parse the INI. The INI    }
-    { stores OutputBasePath relative to the OutJob; absolute paths pass    }
-    { through. Trailing slash normalised so Python can append filenames.   }
-    OutputDir := '';
-    If RelativePath <> '' Then
-    Begin
-        If (Length(RelativePath) >= 2) And (Copy(RelativePath, 2, 1) = ':') Then
-            OutputDir := RelativePath
-        Else
-            OutputDir := ExtractFilePath(OutJobPath) + RelativePath;
-        If (Length(OutputDir) > 0) And
-           (Copy(OutputDir, Length(OutputDir), 1) <> '\') Then
-            OutputDir := OutputDir + '\';
-    End;
 
     { NOT A SUCCESS CLAIM. The process was issued, and nothing here can say }
     { whether it wrote anything: a container bound to a managed release, or }
@@ -3797,7 +4336,6 @@ Begin
         '{"process_issued":true' +
         ',"container_name":"' + EscapeJsonString(ContainerName) + '"' +
         ',"container_type":"' + EscapeJsonString(ContainerType) + '"' +
-        ',"relative_path":"' + EscapeJsonString(RelativePath) + '"' +
         ',"output_dir":"' + EscapeJsonString(OutputDir) + '"' +
         ',"outjob_path":"' + EscapeJsonString(OutJobPath) + '"' +
         ',"outjob_opened":' + BoolToJsonStr(OutJobOpened) +
@@ -4844,6 +5382,85 @@ End;
 { Params: variant (name or description), designator, set ('Name=Value'       }
 { items joined by '~~'), clear (names joined by '~~'), project_path.          }
 {..............................................................................}
+{..............................................................................}
+{ Proj_RemoveParameter - remove one project parameter by name and write the  }
+{ project file (only that file). DM_RemoveParameterByName does nothing and   }
+{ raises nothing for a name that is not there, so the parameter list is      }
+{ checked before (NOT_FOUND) and after (removed is read back).               }
+{ Params: name (required), project_path (optional).                          }
+{..............................................................................}
+Function Proj_RemoveParameter(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, ParamName : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Param : IParameter;
+    I, Before, After : Integer;
+    Found, Still, FileSaved : Boolean;
+Begin
+    ParamName := ExtractJsonValue(Params, 'name');
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    If ParamName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'name is required');
+        Exit;
+    End;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
+        Exit;
+    End;
+    If ProjectPath <> '' Then
+        Project := FindProjectByPath(Workspace, ProjectPath)
+    Else
+        Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND', 'No project found');
+        Exit;
+    End;
+    ProjectPath := Project.DM_ProjectFullPath;
+    If Not FileExists(ProjectPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND',
+            'The project in focus is "' + ProjectPath
+            + '", not a project file; pass project_path. Nothing was removed.');
+        Exit;
+    End;
+    Found := False;
+    Before := Project.DM_ParameterCount;
+    For I := 0 To Before - 1 Do
+    Begin
+        Param := Project.DM_Parameters(I);
+        If (Param <> Nil) And (Param.DM_Name = ParamName) Then Found := True;
+    End;
+    If Not Found Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'The project has no parameter "' + ParamName + '". Nothing was removed.');
+        Exit;
+    End;
+    Project.DM_RemoveParameterByName(ParamName);
+    After := Project.DM_ParameterCount;
+    Still := False;
+    For I := 0 To After - 1 Do
+    Begin
+        Param := Project.DM_Parameters(I);
+        If (Param <> Nil) And (Param.DM_Name = ParamName) Then Still := True;
+    End;
+    FileSaved := False;
+    If Not Still Then FileSaved := SaveProjectFile(Project);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('success', Not Still) + ','
+        + JsonStr('name', ParamName) + ','
+        + JsonBool('removed', Not Still) + ','
+        + JsonInt('parameters_before', Before) + ','
+        + JsonInt('parameters_after', After) + ','
+        + JsonBool('project_file_saved', FileSaved) + ','
+        + JsonStr('project_path', ProjectPath)));
+End;
+
 Function Proj_SetParameterVariation(Params : String; RequestId : String) : String;
 Var
     ProjectPath, VarWanted, Desig, SetStr, ClearStr, Item, PName, PValue : String;
@@ -5695,6 +6312,104 @@ End;
 
 { The project's documents in project order, its search paths and its        }
 { generated documents, as JSON members (no braces).                         }
+{..............................................................................}
+{ Class generation options (Project Options > Class Generation). The         }
+{ interfaces IProjectClassGenerationOptions / IDocumentClassGenerationOptions }
+{ are not named in the script engine, so the objects are held in Variants;  }
+{ every member read and written here was proven on AD 25.8.1.               }
+{ NetClassAutoScope: 0 none, 1 local nets only, 2 all nets.                  }
+{..............................................................................}
+Function ProjectClassGenJson(Project : IProject) : String;
+Var
+    Opts : Variant;
+Begin
+    Result := '';
+    Try
+        Opts := Project.DM_GetProjectClassGenerationOptions;
+        Result := JsonBool('comp_class_manual', Opts.CompClassManualEnabled) + ','
+            + JsonBool('comp_class_manual_room', Opts.CompClassManualRoomEnabled) + ','
+            + JsonBool('net_class_auto_bus', Opts.NetClassAutoBusEnabled) + ','
+            + JsonBool('net_class_auto_comp', Opts.NetClassAutoCompEnabled) + ','
+            + JsonBool('net_class_auto_named_harness', Opts.NetClassAutoNamedHarnessEnabled) + ','
+            + JsonBool('net_class_manual', Opts.NetClassManualEnabled) + ','
+            + JsonBool('net_class_separate_bus_sections', Opts.NetClassSeparateForBusSections);
+    Except
+        Result := '';
+    End;
+    Result := '{' + Result + '}';
+End;
+
+Function DocumentClassGenJson(Project : IProject; Path : String) : String;
+Var
+    Opts : Variant;
+Begin
+    Result := '';
+    Try
+        Opts := Project.DM_DocumentClassGenerationOptions(Path);
+        Result := JsonStr('path', Path) + ','
+            + JsonBool('comp_class_auto', Opts.CompClassAutoEnabled) + ','
+            + JsonBool('comp_class_auto_room', Opts.CompClassAutoRoomEnabled) + ','
+            + JsonBool('generate_class_cluster', Opts.GenerateClassCluster) + ','
+            + JsonInt('net_class_auto_scope', Opts.NetClassAutoScope);
+    Except
+        Result := JsonStr('path', Path);
+    End;
+    Result := '{' + Result + '}';
+End;
+
+{ Every schematic sheet of the project with its class generation options. }
+Function ClassGenJson(Project : IProject) : String;
+Var
+    Docs, Path : String;
+    Doc : IDocument;
+    I : Integer;
+Begin
+    Docs := '';
+    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Nil;
+        Try Doc := Project.DM_LogicalDocuments(I); Except Doc := Nil; End;
+        If Doc = Nil Then Continue;
+        If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
+        Path := Doc.DM_FullPath;
+        If Docs <> '' Then Docs := Docs + ',';
+        Docs := Docs + DocumentClassGenJson(Project, Path);
+    End;
+    Result := JsonRaw('project', ProjectClassGenJson(Project)) + ','
+        + JsonRaw('documents', '[' + Docs + ']');
+End;
+
+{ One class generation flag: '' = keep, 'true' / 'false' = write and read }
+{ back. Returns the field name when the write did not take, else ''.      }
+Function SetProjectClassGenFlag(Opts : Variant; Field, Value : String) : String;
+Var
+    Want, Got : Boolean;
+Begin
+    Result := '';
+    If Value = '' Then Exit;
+    Want := Value = 'true';
+    Got := Not Want;
+    Try
+        If Field = 'comp_class_manual' Then
+        Begin Opts.CompClassManualEnabled := Want; Got := Opts.CompClassManualEnabled; End
+        Else If Field = 'comp_class_manual_room' Then
+        Begin Opts.CompClassManualRoomEnabled := Want; Got := Opts.CompClassManualRoomEnabled; End
+        Else If Field = 'net_class_auto_bus' Then
+        Begin Opts.NetClassAutoBusEnabled := Want; Got := Opts.NetClassAutoBusEnabled; End
+        Else If Field = 'net_class_auto_comp' Then
+        Begin Opts.NetClassAutoCompEnabled := Want; Got := Opts.NetClassAutoCompEnabled; End
+        Else If Field = 'net_class_auto_named_harness' Then
+        Begin Opts.NetClassAutoNamedHarnessEnabled := Want; Got := Opts.NetClassAutoNamedHarnessEnabled; End
+        Else If Field = 'net_class_manual' Then
+        Begin Opts.NetClassManualEnabled := Want; Got := Opts.NetClassManualEnabled; End
+        Else If Field = 'net_class_separate_bus_sections' Then
+        Begin Opts.NetClassSeparateForBusSections := Want; Got := Opts.NetClassSeparateForBusSections; End;
+    Except
+        Got := Not Want;
+    End;
+    If Got <> Want Then Result := '"' + Field + '",';
+End;
+
 Function ProjectSetupJson(Project : IProject) : String;
 Var
     Docs, Paths, Gens, Path : String;
@@ -5704,6 +6419,7 @@ Var
     Order : TStringList;
     OutPath : String;
     Sub, AllowPort, AllowEntry, AppendSheet, SwapLabel, SwapPin : Boolean;
+    SinglePin, AutoNumber, NameHier, PowerFirst : Boolean;
 Begin
     Order := TStringList.Create;
     Total := Project.DM_LogicalDocumentCount + Project.DM_PhysicalDocumentCount;
@@ -5770,6 +6486,12 @@ Begin
     Try AppendSheet := Project.DM_GetAppendSheetNumberToLocalNets; Except End;
     Try SwapLabel := Project.DM_GetPinSwapBy_Netlabel; Except End;
     Try SwapPin := Project.DM_GetPinSwapBy_Pin; Except End;
+    SinglePin := False; AutoNumber := False; NameHier := False; PowerFirst := False;
+    Try SinglePin := Project.DM_GetNetlistSinglePinNets; Except End;
+    Try AutoNumber := Project.DM_GetAutoSheetNumbering; Except End;
+    { Read only: the script engine has no setter for these two. }
+    Try NameHier := Project.DM_GetNameNetsHierarchically; Except End;
+    Try PowerFirst := Project.DM_GetPowerPortNamesTakePriority; Except End;
     Result := JsonRaw('documents', '[' + Docs + ']') + ','
         + JsonRaw('search_paths', '[' + Paths + ']') + ','
         + JsonRaw('generated_documents', '[' + Gens + ']') + ','
@@ -5779,7 +6501,12 @@ Begin
         + JsonStr('output_path', OutPath) + ','
         + JsonBool('append_sheet_number_to_local_nets', AppendSheet) + ','
         + JsonBool('pin_swap_by_net_label', SwapLabel) + ','
-        + JsonBool('pin_swap_by_pin', SwapPin);
+        + JsonBool('pin_swap_by_pin', SwapPin) + ','
+        + JsonBool('single_pin_nets', SinglePin) + ','
+        + JsonBool('auto_sheet_numbering', AutoNumber) + ','
+        + JsonBool('name_nets_hierarchically', NameHier) + ','
+        + JsonBool('power_port_names_take_priority', PowerFirst) + ','
+        + JsonRaw('class_generation', '{' + ClassGenJson(Project) + '}');
 End;
 
 {..............................................................................}
@@ -5797,12 +6524,16 @@ Function Proj_ProjectSetup(Params : String; RequestId : String) : String;
 Var
     ProjectPath, MoveDoc, MoveTo, AddPath, SubStr, PortStr, EntryStr, NotApplied : String;
     ModeStr, OutStr, AppendStr, SwapLabelStr, SwapPinStr : String;
+    SinglePinStr, AutoNumStr, CGDoc, CCAutoStr, CCRoomStr, ClusterStr, ScopeStr : String;
+    CGFields, Field, FieldValue : String;
     Workspace : IWorkspace;
     Project : IProject;
     SP : ISearchPath;
+    Opts, DocOpts : Variant;
     I, NewIdx, Was, NowIdx, PathsBefore : Integer;
-    Changed, Found : Boolean;
+    Changed, Found, HaveOpts, DocOK : Boolean;
 Begin
+    HaveOpts := False;
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     MoveDoc := ExtractJsonValue(Params, 'move_document');
     MoveTo := ExtractJsonValue(Params, 'move_to_index');
@@ -5815,9 +6546,28 @@ Begin
     AppendStr := LowerCase(ExtractJsonValue(Params, 'append_sheet_number_to_local_nets'));
     SwapLabelStr := LowerCase(ExtractJsonValue(Params, 'pin_swap_by_net_label'));
     SwapPinStr := LowerCase(ExtractJsonValue(Params, 'pin_swap_by_pin'));
+    SinglePinStr := LowerCase(ExtractJsonValue(Params, 'single_pin_nets'));
+    AutoNumStr := LowerCase(ExtractJsonValue(Params, 'auto_sheet_numbering'));
+    CGDoc := ExtractJsonValue(Params, 'class_gen_document');
+    CCAutoStr := LowerCase(ExtractJsonValue(Params, 'comp_class_auto'));
+    CCRoomStr := LowerCase(ExtractJsonValue(Params, 'comp_class_auto_room'));
+    ClusterStr := LowerCase(ExtractJsonValue(Params, 'generate_class_cluster'));
+    ScopeStr := ExtractJsonValue(Params, 'net_class_auto_scope');
     If (ModeStr <> '') And (Not IsIntStr(ModeStr)) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'hierarchy_mode must be a number');
+        Exit;
+    End;
+    If (ScopeStr <> '') And (ScopeStr <> '0') And (ScopeStr <> '1') And (ScopeStr <> '2') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'net_class_auto_scope is 0, 1 or 2');
+        Exit;
+    End;
+    If (CGDoc = '') And ((CCAutoStr <> '') Or (CCRoomStr <> '') Or (ClusterStr <> '') Or (ScopeStr <> '')) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM',
+            'comp_class_auto, comp_class_auto_room, generate_class_cluster and '
+            + 'net_class_auto_scope are per sheet: name it in class_gen_document');
         Exit;
     End;
     Workspace := GetWorkspace;
@@ -5825,6 +6575,11 @@ Begin
     If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
     Else Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
+    If (CGDoc <> '') And (Project.DM_IndexOfSourceDocument(CGDoc) < 0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_DOCUMENT', 'Not in the project: ' + CGDoc);
+        Exit;
+    End;
     Changed := False;
     NotApplied := '';
     Was := -1; NowIdx := -1;
@@ -5914,6 +6669,99 @@ Begin
         Changed := True;
         If Project.DM_GetPinSwapBy_Pin <> (SwapPinStr = 'true') Then
             NotApplied := NotApplied + '"pin_swap_by_pin",';
+    End;
+    If SinglePinStr <> '' Then
+    Begin
+        Project.DM_SetNetlistSinglePinNets(SinglePinStr = 'true');
+        Changed := True;
+        If Project.DM_GetNetlistSinglePinNets <> (SinglePinStr = 'true') Then
+            NotApplied := NotApplied + '"single_pin_nets",';
+    End;
+    If AutoNumStr <> '' Then
+    Begin
+        Project.DM_SetAutoSheetNumbering(AutoNumStr = 'true');
+        Changed := True;
+        If Project.DM_GetAutoSheetNumbering <> (AutoNumStr = 'true') Then
+            NotApplied := NotApplied + '"auto_sheet_numbering",';
+    End;
+    { Project-wide class generation: one read-back per flag. }
+    CGFields := 'comp_class_manual,comp_class_manual_room,net_class_auto_bus,'
+        + 'net_class_auto_comp,net_class_auto_named_harness,net_class_manual,'
+        + 'net_class_separate_bus_sections';
+    While CGFields <> '' Do
+    Begin
+        I := Pos(',', CGFields);
+        If I = 0 Then Begin Field := CGFields; CGFields := ''; End
+        Else Begin Field := Copy(CGFields, 1, I - 1); CGFields := Copy(CGFields, I + 1, Length(CGFields)); End;
+        FieldValue := LowerCase(ExtractJsonValue(Params, Field));
+        If FieldValue = '' Then Continue;
+        Changed := True;
+        If Not HaveOpts Then
+        Begin
+            Try
+                Opts := Project.DM_GetProjectClassGenerationOptions;
+                HaveOpts := True;
+            Except
+                HaveOpts := False;
+            End;
+        End;
+        If HaveOpts Then
+            NotApplied := NotApplied + SetProjectClassGenFlag(Opts, Field, FieldValue)
+        Else
+            NotApplied := NotApplied + '"' + Field + '",';
+    End;
+    { One sheet's class generation. }
+    If (CCAutoStr <> '') Or (CCRoomStr <> '') Or (ClusterStr <> '') Or (ScopeStr <> '') Then
+    Begin
+        Changed := True;
+        DocOK := False;
+        Try
+            DocOpts := Project.DM_DocumentClassGenerationOptions(CGDoc);
+            DocOK := True;
+        Except
+            DocOK := False;
+        End;
+        If DocOK And (CCAutoStr <> '') Then
+        Begin
+            Try
+                DocOpts.CompClassAutoEnabled := CCAutoStr = 'true';
+                If DocOpts.CompClassAutoEnabled <> (CCAutoStr = 'true') Then
+                    NotApplied := NotApplied + '"comp_class_auto",';
+            Except
+                NotApplied := NotApplied + '"comp_class_auto",';
+            End;
+        End;
+        If DocOK And (CCRoomStr <> '') Then
+        Begin
+            Try
+                DocOpts.CompClassAutoRoomEnabled := CCRoomStr = 'true';
+                If DocOpts.CompClassAutoRoomEnabled <> (CCRoomStr = 'true') Then
+                    NotApplied := NotApplied + '"comp_class_auto_room",';
+            Except
+                NotApplied := NotApplied + '"comp_class_auto_room",';
+            End;
+        End;
+        If DocOK And (ClusterStr <> '') Then
+        Begin
+            Try
+                DocOpts.GenerateClassCluster := ClusterStr = 'true';
+                If DocOpts.GenerateClassCluster <> (ClusterStr = 'true') Then
+                    NotApplied := NotApplied + '"generate_class_cluster",';
+            Except
+                NotApplied := NotApplied + '"generate_class_cluster",';
+            End;
+        End;
+        If DocOK And (ScopeStr <> '') Then
+        Begin
+            Try
+                DocOpts.NetClassAutoScope := StrToInt(ScopeStr);
+                If DocOpts.NetClassAutoScope <> StrToInt(ScopeStr) Then
+                    NotApplied := NotApplied + '"net_class_auto_scope",';
+            Except
+                NotApplied := NotApplied + '"net_class_auto_scope",';
+            End;
+        End;
+        If Not DocOK Then NotApplied := NotApplied + '"class_gen_document",';
     End;
     If NotApplied <> '' Then NotApplied := Copy(NotApplied, 1, Length(NotApplied) - 1);
     Result := BuildSuccessResponse(RequestId, JsonObj(
@@ -6231,6 +7079,130 @@ Begin
 End;
 
 {..............................................................................}
+{ ConnectivityEntries - the pin / net records of every designator in Wanted,  }
+{ comma-separated, each as Proj_GetConnectivity returns one; the designators  }
+{ found are added to Matched. A multi-part component placed across several    }
+{ sheets is one component per sheet in the compiled model, and each answers  }
+{ a net only for the pins of its own part ("?" for the rest). So a pin's net  }
+{ is taken from whichever sheet resolved it, and "sheets" lists them all.     }
+{ Three passes: the sheets of each designator; the nets of those on more     }
+{ than one; then each written from its first sheet.                          }
+{..............................................................................}
+Function ConnectivityEntries(Project : IProject; Wanted : TStringList;
+    Matched : TStringList) : String;
+Var
+    Doc : IDocument;
+    Comp : IComponent;
+    Pin : IPin;
+    I, J, K, DocCount, Seen : Integer;
+    UsePhysical, FirstPin, Multi : Boolean;
+    Counts, SheetsBy, Nets : TStringList;
+    Desig, Sheet, PinNum, Net, Other, PinList, Entry : String;
+Begin
+    Result := '';
+    Counts := TStringList.Create;
+    SheetsBy := TStringList.Create;
+    Nets := TStringList.Create;
+    Try
+        GetCompiledDocs(Project, DocCount, UsePhysical);
+        For I := 0 To DocCount - 1 Do
+        Begin
+            Doc := GetCompiledDoc(Project, I, UsePhysical);
+            If Doc = Nil Then Continue;
+            Sheet := '"' + EscapeJsonString(Doc.DM_FileName) + '"';
+            For J := 0 To Doc.DM_ComponentCount - 1 Do
+            Begin
+                Comp := Doc.DM_Components(J);
+                If Comp = Nil Then Continue;
+                Desig := Comp.DM_PhysicalDesignator;
+                If Wanted.IndexOf(Desig) < 0 Then Continue;
+                Seen := StrToIntDef(Counts.Values[Desig], 0);
+                Counts.Values[Desig] := IntToStr(Seen + 1);
+                If Pos(Sheet, SheetsBy.Values[Desig]) = 0 Then
+                Begin
+                    If SheetsBy.Values[Desig] = '' Then SheetsBy.Values[Desig] := Sheet
+                    Else SheetsBy.Values[Desig] := SheetsBy.Values[Desig] + ',' + Sheet;
+                End;
+            End;
+        End;
+
+        For I := 0 To DocCount - 1 Do
+        Begin
+            Doc := GetCompiledDoc(Project, I, UsePhysical);
+            If Doc = Nil Then Continue;
+            For J := 0 To Doc.DM_ComponentCount - 1 Do
+            Begin
+                Comp := Doc.DM_Components(J);
+                If Comp = Nil Then Continue;
+                Desig := Comp.DM_PhysicalDesignator;
+                If StrToIntDef(Counts.Values[Desig], 0) < 2 Then Continue;
+                For K := 0 To Comp.DM_PinCount - 1 Do
+                Begin
+                    Pin := Comp.DM_Pins(K);
+                    If Pin = Nil Then Continue;
+                    PinNum := Pin.DM_PinNumber;
+                    Net := Pin.DM_FlattenedNetName;
+                    If (Net = '') Or (Net = '?') Or (Pos('=', PinNum) > 0) Then Continue;
+                    If Nets.Values[Desig + '|' + PinNum] = '' Then
+                        Nets.Values[Desig + '|' + PinNum] := Net;
+                End;
+            End;
+        End;
+
+        For I := 0 To DocCount - 1 Do
+        Begin
+            Doc := GetCompiledDoc(Project, I, UsePhysical);
+            If Doc = Nil Then Continue;
+            For J := 0 To Doc.DM_ComponentCount - 1 Do
+            Begin
+                Comp := Doc.DM_Components(J);
+                If Comp = Nil Then Continue;
+                Desig := Comp.DM_PhysicalDesignator;
+                If Wanted.IndexOf(Desig) < 0 Then Continue;
+                If Matched.IndexOf(Desig) >= 0 Then Continue;
+                Matched.Add(Desig);
+                Multi := StrToIntDef(Counts.Values[Desig], 0) > 1;
+
+                PinList := '';
+                FirstPin := True;
+                For K := 0 To Comp.DM_PinCount - 1 Do
+                Begin
+                    Pin := Comp.DM_Pins(K);
+                    If Pin = Nil Then Continue;
+                    PinNum := Pin.DM_PinNumber;
+                    Net := Pin.DM_FlattenedNetName;
+                    If Multi And ((Net = '') Or (Net = '?')) And (Pos('=', PinNum) = 0) Then
+                    Begin
+                        Other := Nets.Values[Desig + '|' + PinNum];
+                        If Other <> '' Then Net := Other;
+                    End;
+                    If Not FirstPin Then PinList := PinList + ',';
+                    FirstPin := False;
+                    { DM_ElectricalType is not a DM_ identifier (undeclared);   }
+                    { query_objects on ePin reads Electrical instead.          }
+                    PinList := PinList + '{"pin_number":"' + EscapeJsonString(PinNum) + '"'
+                        + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"'
+                        + ',"net":"' + EscapeJsonString(Net) + '"}';
+                End;
+
+                Entry := '{"designator":"' + EscapeJsonString(Desig) + '"'
+                    + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"'
+                    + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"'
+                    + ',"sheets":[' + SheetsBy.Values[Desig] + ']'
+                    + ',"pin_count":' + IntToStr(Comp.DM_PinCount)
+                    + ',"pins":[' + PinList + ']}';
+                If Result <> '' Then Result := Result + ',';
+                Result := Result + Entry;
+            End;
+        End;
+    Finally
+        Counts.Free;
+        SheetsBy.Free;
+        Nets.Free;
+    End;
+End;
+
+{..............................................................................}
 { Get connectivity info for a specific component (all pins + nets)            }
 { Params: designator, project_path (optional)                                 }
 {..............................................................................}
@@ -6240,13 +7212,8 @@ Var
     ProjectPath, Designator : String;
     Workspace : IWorkspace;
     Project : IProject;
-    Doc : IDocument;
-    Comp : IComponent;
-    Pin : IPin;
-    I, J, K, DocCount : Integer;
-    UsePhysical : Boolean;
-    Data, PinList : String;
-    FirstPin, Found : Boolean;
+    Wanted, Matched : TStringList;
+    Data : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     Designator := ExtractJsonValue(Params, 'designator');
@@ -6262,53 +7229,19 @@ Begin
 
     ForceRecompileIfRequested(Project, Params);
     SmartCompile(Project);
-    Found := False;
 
-    GetCompiledDocs(Project, DocCount, UsePhysical);
-    For I := 0 To DocCount - 1 Do
-    Begin
-        If Found Then Break;
-        Doc := GetCompiledDoc(Project, I, UsePhysical);
-        If Doc = Nil Then Continue;
-
-        For J := 0 To Doc.DM_ComponentCount - 1 Do
-        Begin
-            Comp := Doc.DM_Components(J);
-            If Comp = Nil Then Continue;
-            If Comp.DM_PhysicalDesignator <> Designator Then Continue;
-
-            Found := True;
-
-            { Build pin-net connectivity list }
-            PinList := '';
-            FirstPin := True;
-            For K := 0 To Comp.DM_PinCount - 1 Do
-            Begin
-                Pin := Comp.DM_Pins(K);
-                If Pin = Nil Then Continue;
-                If Not FirstPin Then PinList := PinList + ',';
-                FirstPin := False;
-                PinList := PinList + '{"pin_number":"' + EscapeJsonString(Pin.DM_PinNumber) + '"';
-                PinList := PinList + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
-                PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
-                { DM_ElectricalType does not exist as a DM_ identifier
-                  (compile-time undeclared). Omitting electrical type; the
-                  Sch-server side (via query_objects eSchPin) exposes
-                  Pin.Electrical if needed. }
-                PinList := PinList + '}';
-            End;
-
-            Data := '{"designator":"' + EscapeJsonString(Designator) + '"';
-            Data := Data + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-            Data := Data + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
-            Data := Data + ',"pin_count":' + IntToStr(Comp.DM_PinCount);
-            Data := Data + ',"pins":[' + PinList + ']}';
-            Result := BuildSuccessResponse(RequestId, Data);
-            Exit;
-        End;
+    Wanted := TStringList.Create;
+    Matched := TStringList.Create;
+    Try
+        Wanted.Add(Designator);
+        Data := ConnectivityEntries(Project, Wanted, Matched);
+    Finally
+        Wanted.Free;
+        Matched.Free;
     End;
-
-    If Not Found Then
+    If Data <> '' Then
+        Result := BuildSuccessResponse(RequestId, Data)
+    Else
         Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'Component not found: ' + Designator);
 End;
 
@@ -6325,13 +7258,9 @@ Var
     ProjectPath, DesigStr, Remaining, ThisDesig : String;
     Workspace : IWorkspace;
     Project : IProject;
-    Doc : IDocument;
-    Comp : IComponent;
-    Pin : IPin;
-    I, J, K, DocCount, SepPos : Integer;
-    UsePhysical : Boolean;
-    Data, PinList, CompEntry, NotFoundJson : String;
-    FirstPin, FirstC, FirstNF : Boolean;
+    I, SepPos : Integer;
+    Data, NotFoundJson : String;
+    FirstNF : Boolean;
     Wanted, MatchedDesigs : TStringList;
     EnvelopeData, ResponseStr : String;
 Begin
@@ -6393,50 +7322,7 @@ Begin
         ForceRecompileIfRequested(Project, Params);
         SmartCompile(Project);
 
-        Data := '';
-        FirstC := True;
-
-        GetCompiledDocs(Project, DocCount, UsePhysical);
-        For I := 0 To DocCount - 1 Do
-        Begin
-            Doc := GetCompiledDoc(Project, I, UsePhysical);
-            If Doc = Nil Then Continue;
-
-            For J := 0 To Doc.DM_ComponentCount - 1 Do
-            Begin
-                Comp := Doc.DM_Components(J);
-                If Comp = Nil Then Continue;
-
-                ThisDesig := Comp.DM_PhysicalDesignator;
-                If Wanted.IndexOf(ThisDesig) < 0 Then Continue;
-                If MatchedDesigs.IndexOf(ThisDesig) >= 0 Then Continue;
-                MatchedDesigs.Add(ThisDesig);
-
-                PinList := '';
-                FirstPin := True;
-                For K := 0 To Comp.DM_PinCount - 1 Do
-                Begin
-                    Pin := Comp.DM_Pins(K);
-                    If Pin = Nil Then Continue;
-                    If Not FirstPin Then PinList := PinList + ',';
-                    FirstPin := False;
-                    PinList := PinList + '{"pin_number":"' + EscapeJsonString(Pin.DM_PinNumber) + '"';
-                    PinList := PinList + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
-                    PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
-                    PinList := PinList + '}';
-                End;
-
-                CompEntry := '{"designator":"' + EscapeJsonString(ThisDesig) + '"';
-                CompEntry := CompEntry + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-                CompEntry := CompEntry + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
-                CompEntry := CompEntry + ',"pin_count":' + IntToStr(Comp.DM_PinCount);
-                CompEntry := CompEntry + ',"pins":[' + PinList + ']}';
-
-                If Not FirstC Then Data := Data + ',';
-                FirstC := False;
-                Data := Data + CompEntry;
-            End;
-        End;
+        Data := ConnectivityEntries(Project, Wanted, MatchedDesigs);
 
         NotFoundJson := '';
         FirstNF := True;
@@ -6464,8 +7350,12 @@ Begin
 End;
 
 {..............................................................................}
-{ Import a document into the project from an external path                    }
-{ Copies the file to the project directory, then adds it to the project.      }
+{ Import a document into the project from an external path.                   }
+{ Altium writes the copy into the project folder, as File > Save Copy As:     }
+{ the source is opened (if it is not), pointed at the new path for one save   }
+{ and pointed back, and closed again if this opened it. Then the copy is      }
+{ added to the project. A file already at the new path is refused, never      }
+{ written over.                                                               }
 { Params: source_path                                                         }
 {..............................................................................}
 
@@ -6474,6 +7364,8 @@ Var
     SourcePath, ProjectDir, DestPath, FileName : String;
     Workspace : IWorkspace;
     Project : IProject;
+    ServerDoc : IServerDocument;
+    WasOpen, WasModified : Boolean;
 Begin
     SourcePath := ExtractJsonValue(Params, 'source_path');
 
@@ -6490,13 +7382,56 @@ Begin
     FileName := ExtractFileName(SourcePath);
     DestPath := ProjectDir + FileName;
 
-    { Copy the file to the project directory (skip if same location) }
     If UpperCase(SourcePath) <> UpperCase(DestPath) Then
     Begin
+        If FileExists(DestPath) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'FILE_EXISTS',
+                'A file is already at ' + DestPath + '; it is not written over');
+            Exit;
+        End;
+        If SaveHeldBack(DestPath) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SAVING_OFF',
+                'Saving is switched off on the bridge dashboard');
+            Exit;
+        End;
+        ServerDoc := Nil;
+        Try ServerDoc := Client.GetDocumentByPath(SourcePath); Except ServerDoc := Nil; End;
+        WasOpen := ServerDoc <> Nil;
+        If Not WasOpen Then
+        Begin
+            ResetParameters;
+            AddStringParameter('ObjectKind', 'Document');
+            AddStringParameter('FileName', SourcePath);
+            RunProcess('WorkspaceManager:OpenObject');
+            Try ServerDoc := Client.GetDocumentByPath(SourcePath); Except ServerDoc := Nil; End;
+        End;
+        If ServerDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NOT_OPENED',
+                'Altium could not open ' + SourcePath + ' to save a copy of it');
+            Exit;
+        End;
+        WasModified := False;
+        Try WasModified := ServerDoc.Modified; Except End;
+        { The rename lasts for the one save, and is put back in Finally. }
         Try
-            CopyFile(SourcePath, DestPath, False);
-        Except
-            Result := BuildErrorResponse(RequestId, 'COPY_FAILED', 'Failed to copy file to project directory');
+            ServerDoc.SetFileName(DestPath);
+            ServerDoc.SetModified(True);
+            ServerDoc.DoFileSave('');
+        Finally
+            Try ServerDoc.SetFileName(SourcePath); Except NoteWriteFailed('point the source back at its own file'); End;
+            Try ServerDoc.SetModified(WasModified); Except NoteWriteFailed('put the source''s modified flag back'); End;
+        End;
+        If Not WasOpen Then
+        Begin
+            Try Client.CloseDocument(ServerDoc); Except End;
+        End;
+        If Not FileExists(DestPath) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'COPY_FAILED',
+                'Altium did not write the copy at ' + DestPath);
             Exit;
         End;
     End;
@@ -6626,16 +7561,18 @@ Begin
         SchEndEdit(SchDoc, 'Edit');
     End;
 
-    { Persist directly to disk via the IServerDocument API. MarkDocDirtyByPath
-      does SetModified + DoFileSave. WorkspaceManager:SaveAll doesn't
-      reach non-active sheets in our tests, so we don't rely on it. }
+    { THE SHEET IS ONLY MARKED, NOT WRITTEN. MarkDocDirtyByPath sets the    }
+    { modified flag and nothing more, as every write here does; a save at a }
+    { checkpoint (app_save_all, proj_save) writes the sheet. Measured on AD }
+    { 25.8.1: a parameter written here and never saved is gone once the     }
+    { project closes, so the reply says the save is still to come.          }
     MarkDocDirtyByPath(FilePath);
     Try SchDoc.GraphicallyInvalidate; Except End;
 
     If Found Then Action := 'updated' Else Action := 'added';
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"action":"' + Action + '"' +
-        ',"saved":true' +
+        ',"saved":false,"pending_save":true' +
         ',"file_path":"' + EscapeJsonString(FilePath) +
         '","name":"' + EscapeJsonString(ParamName) +
         '","value":"' + EscapeJsonString(ParamValue) + '"}');
@@ -7482,6 +8419,16 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_PROJECT', Problem);
         Exit;
     End;
+    { With a loose document in front the focused project is Free Documents, }
+    { which has no project file: its levels are the ones every free sheet  }
+    { is checked against, and nobody asked to change those.                }
+    If Not FileExists(Project.DM_ProjectFullPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT',
+            'The project in focus is "' + Project.DM_ProjectFullPath
+            + '", not a project file; pass project_path. Nothing was written.');
+        Exit;
+    End;
     Workspace := GetWorkspace;
     LevelsStr := ExtractJsonValue(Params, 'levels');
     If LevelsStr = '' Then
@@ -7828,6 +8775,239 @@ End;
 { Command Handler - must be at end so all functions are declared               }
 {..............................................................................}
 
+{..............................................................................}
+{ Proj_RenameDocument - a project document given a new file name by Altium.  }
+{ The document is saved under the new name with DoSafeChangeFileNameAndSave  }
+{ (Altium's Save As), the project entry is read back and moved only if Altium }
+{ left it, every sheet symbol in the project naming the old file is pointed  }
+{ at the new one, and the project is saved and compiled. The old file stays  }
+{ on disk: nothing here deletes a file.                                       }
+{..............................................................................}
+
+Function RenameSheetSymbolsIn(Project : IProject; OldPath, NewPath : String;
+    Var Failed : String) : String;
+Var
+    I : Integer;
+    Doc : IDocument;
+    DocPath, Ref, NewRef, OldName, NewName : String;
+    SchDoc : ISch_Document;
+    It : ISch_Iterator;
+    Sym : ISch_SheetSymbol;
+    Touched : Boolean;
+Begin
+    Result := '';
+    Failed := '';
+    OldName := ExtractFileName(OldPath);
+    NewName := ExtractFileName(NewPath);
+    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Nil;
+        Try Doc := Project.DM_LogicalDocuments(I); Except End;
+        If Doc = Nil Then Continue;
+        If Doc.DM_DocumentKind <> 'SCH' Then Continue;
+        DocPath := '';
+        Try DocPath := Doc.DM_FullPath; Except End;
+        SchDoc := SchDocByPathLoading(DocPath);
+        If SchDoc = Nil Then Continue;
+        Touched := False;
+        It := SchDoc.SchIterator_Create;
+        Try
+            It.AddFilter_ObjectSet(MkSet(eSheetSymbol));
+            Sym := It.FirstSchObject;
+            While Sym <> Nil Do
+            Begin
+                Ref := '';
+                Try Ref := Sym.SheetFileName.Text; Except End;
+                NewRef := '';
+                If SameText(Ref, OldName) Then NewRef := NewName
+                Else If SameText(Ref, OldPath) Then NewRef := NewPath;
+                If NewRef <> '' Then
+                Begin
+                    If Not Touched Then SchBeginEdit(SchDoc, '');
+                    Touched := True;
+                    { Announced, as obj_modify does: without it the compile }
+                    { kept the old file name after a recompile.            }
+                    SchBeginModify(Sym);
+                    Try Sym.SheetFileName.Text := NewRef; Except { read back below and listed as not changed } End;
+                    SchEndModify(Sym);
+                    Ref := '';
+                    Try Ref := Sym.SheetFileName.Text; Except End;
+                    If Ref = NewRef Then
+                    Begin
+                        If Result <> '' Then Result := Result + ',';
+                        Result := Result + '{"sheet":"' + EscapeJsonString(DocPath)
+                            + '","sheet_file_name":"' + EscapeJsonString(NewRef) + '"}';
+                    End
+                    Else
+                    Begin
+                        If Failed <> '' Then Failed := Failed + ',';
+                        Failed := Failed + '"' + EscapeJsonString(DocPath) + '"';
+                    End;
+                End;
+                Sym := It.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(It);
+        End;
+        If Touched Then
+        Begin
+            SchEndEdit(SchDoc, 'Edit');
+            Try SchDoc.GraphicallyInvalidate; Except End;
+            MarkDocDirtyByPath(DocPath);
+        End;
+    End;
+End;
+
+Function Proj_RenameDocument(Params : String; RequestId : String) : String;
+Var
+    OldPath, NewName, NewPath, ProjectPath, Kind, Symbols, Failed, Note : String;
+    Project : IProject;
+    Workspace : IWorkspace;
+    ServerDoc : IServerDocument;
+    Saved, ListsNew, ListsOld, Moved : Boolean;
+Begin
+    OldPath := ExtractJsonValue(Params, 'document_path');
+    NewName := ExtractJsonValue(Params, 'new_name');
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    If (OldPath = '') Or (NewName = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'document_path and new_name are required');
+        Exit;
+    End;
+    If (Pos('\', NewName) > 0) Or (Pos('/', NewName) > 0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_NAME',
+            'new_name is a file name, not a path: the document stays in its folder.');
+        Exit;
+    End;
+    If ExtractFileExt(NewName) = '' Then
+        NewName := NewName + ExtractFileExt(OldPath);
+    If Not SameText(ExtractFileExt(NewName), ExtractFileExt(OldPath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_NAME',
+            'new_name changes the extension (' + ExtractFileExt(OldPath) + ' to '
+            + ExtractFileExt(NewName) + '), which would change the document kind.');
+        Exit;
+    End;
+    NewPath := ExtractFilePath(OldPath) + NewName;
+    If FileExists(NewPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FILE_EXISTS',
+            NewPath + ' already exists. Nothing was renamed.');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
+        Exit;
+    End;
+    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+    Else Project := ProjectHoldingDoc(OldPath);
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_A_MEMBER',
+            OldPath + ' is not a document of an open project. Nothing was renamed.');
+        Exit;
+    End;
+    If Not ProjectListsDocument(Project, OldPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_A_MEMBER',
+            OldPath + ' is not a document of ' + Project.DM_ProjectFullPath
+            + '. Nothing was renamed.');
+        Exit;
+    End;
+
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(OldPath); Except ServerDoc := Nil; End;
+    If ServerDoc = Nil Then
+    Begin
+        Try Client.OpenDocument('', OldPath); Except End;
+        Try ServerDoc := Client.GetDocumentByPath(OldPath); Except ServerDoc := Nil; End;
+    End;
+    If ServerDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_LOADED',
+            'Altium could not open ' + OldPath + '. Nothing was renamed.');
+        Exit;
+    End;
+    Kind := '';
+    Try Kind := ServerDoc.Kind; Except Kind := ''; End;
+
+    Saved := False;
+    Try Saved := ServerDoc.DoSafeChangeFileNameAndSave(NewPath, Kind); Except Saved := False; End;
+    Saved := Saved And FileExists(NewPath);
+    { MEASURED (AD 26.11): for a sheet this declines and writes nothing.   }
+    { The document is pointed at the new name and saved instead, the way   }
+    { the board's save-a-copy writes its copy.                             }
+    If Not Saved Then
+    Begin
+        Try ServerDoc.SetFileName(NewPath); Except { the file check below decides } End;
+        Try
+            ServerDoc.SetModified(True);
+            ServerDoc.DoFileSave('');
+        Except { the file check below decides } End;
+        Saved := FileExists(NewPath);
+        If Not Saved Then
+        Begin
+            Try ServerDoc.SetFileName(OldPath); Except NoteWriteFailed('point the document back at its old name'); End;
+        End;
+    End;
+    If Not Saved Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SAVE_FAILED',
+            'Altium did not save ' + OldPath + ' as ' + NewPath + '. Nothing was renamed.');
+        Exit;
+    End;
+
+    { Altium's Save As is expected to move the project entry with the      }
+    { document. Only when it did not is the entry moved here, which puts   }
+    { it last in the document order.                                       }
+    Moved := False;
+    ListsNew := ProjectListsDocument(Project, NewPath);
+    ListsOld := ProjectListsDocument(Project, OldPath);
+    If Not ListsNew Then
+    Begin
+        Try Project.DM_AddSourceDocument(NewPath); Except End;
+        ListsNew := ProjectListsDocument(Project, NewPath);
+        Moved := ListsNew;
+    End;
+    If ListsOld And ListsNew Then
+    Begin
+        Try Project.DM_RemoveSourceDocument(OldPath); Except End;
+        ListsOld := ProjectListsDocument(Project, OldPath);
+    End;
+
+    Symbols := '';
+    Failed := '';
+    If SameText(ExtractFileExt(NewPath), '.SchDoc') Then
+        Symbols := RenameSheetSymbolsIn(Project, OldPath, NewPath, Failed);
+
+    Try Project.DM_Compile; Except End;
+    Note := '';
+    If FileExists(OldPath) Then
+        Note := 'The old file ' + OldPath + ' is still on disk; nothing here deletes files.';
+    If Moved Then
+        Note := Note + 'Altium did not move the project entry, so it was added '
+            + 'again and now comes last in the document order.';
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":' + BoolToJsonStr(ListsNew And (Not ListsOld) And (Failed = ''))
+        + ',"old_path":"' + EscapeJsonString(OldPath) + '"'
+        + ',"new_path":"' + EscapeJsonString(NewPath) + '"'
+        + ',"project_path":"' + EscapeJsonString(Project.DM_ProjectFullPath) + '"'
+        + ',"saved":true'
+        + ',"in_project":' + BoolToJsonStr(ListsNew)
+        + ',"old_entry_left":' + BoolToJsonStr(ListsOld)
+        + ',"entry_moved_last":' + BoolToJsonStr(Moved)
+        + ',"sheet_symbols":[' + Symbols + ']'
+        + ',"sheet_symbols_not_changed":[' + Failed + ']'
+        + ',"project_saved":' + BoolToJsonStr(SaveProjectFile(Project))
+        + ',"note":"' + EscapeJsonString(Note) + '"}');
+End;
+
 Function HandleProjectCommand(Action : String; Params : String; RequestId : String) : String;
 Begin
     Case Action Of
@@ -7838,8 +9018,12 @@ Begin
         'get_documents':     Result := Proj_GetDocuments(Params, RequestId);
         'add_document':      Result := Proj_AddDocument(Params, RequestId);
         'remove_document':   Result := Proj_RemoveDocument(Params, RequestId);
+        'file_documents':    Result := Proj_FileDocuments(Params, RequestId);
+        'rewrite_file':      Result := Proj_RewriteFile(Params, RequestId);
+        'rename_document':   Result := Proj_RenameDocument(Params, RequestId);
         'get_parameters':    Result := Proj_GetParameters(Params, RequestId);
         'set_parameter':     Result := Proj_SetParameter(Params, RequestId);
+        'remove_parameter':  Result := Proj_RemoveParameter(Params, RequestId);
         'push_params_to_sheets': Result := Proj_PushParamsToSheets(Params, RequestId);
         'compile':           Result := Proj_Compile(Params, RequestId);
         'get_focused':       Result := Proj_GetFocused(RequestId);

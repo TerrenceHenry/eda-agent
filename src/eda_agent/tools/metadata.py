@@ -116,12 +116,12 @@ _SIMULATOR_TOOLS = frozenset({
     "lib_add_footprint_pads", "lib_add_footprint_track",
     "lib_add_footprint_tracks", "lib_add_pins",
     "lib_add_symbol_polygon", "lib_add_symbol_rectangle", "lib_add_symbol_text",
-    "lib_batch_rename", "lib_batch_set_params", "lib_create_3d_model",
+    "lib_audit_footprint_vs_datasheet", "lib_batch_rename", "lib_batch_set_params", "lib_create_3d_model",
     "lib_create_footprint",
-    "lib_create_ic_symbol", "lib_create_symbol_in_parts",
-    "lib_create_standard_footprint",
+    "lib_create_ic_symbol",
     "lib_create_symbol", "lib_delete_footprint_primitives", "lib_diff_libraries",
-    "lib_get_component_details", "lib_get_components",
+    "lib_get_component_details", "lib_get_components", "lib_get_pad_geometry",
+    "lib_get_pin_list",
     "lib_link_3d_model", "lib_link_footprint",
     "obj_create", "obj_delete", "obj_deselect_all", "obj_get_font_id",
     "obj_get_font_spec", "obj_modify", "obj_query", "obj_run_process",
@@ -136,7 +136,7 @@ _SIMULATOR_TOOLS = frozenset({
     "proj_export_netlist", "proj_export_pdf", "proj_get_board_info",
     "proj_get_bom", "proj_get_component_info", "proj_get_focused",
     "proj_get_nets", "proj_get_parameters", "proj_get_stats",
-    "proj_list_documents", "proj_list_open", "proj_list_variants", "proj_open",
+    "proj_import_from_kicad", "proj_list_documents", "proj_list_open", "proj_list_variants", "proj_open",
     "proj_remove_document", "proj_run_output", "proj_save",
     "proj_set_parameter", "proj_update_from_libraries",
     "sch_place_comment", "sch_tidy_port_references",
@@ -192,6 +192,7 @@ INTERACTION_OVERRIDES = {
     # nothing to a design.
     "app_document_owners": READONLY,
     "app_claim_document": READONLY,
+    "app_release_document": READONLY,
     # Reads the rules, or keeps an approved copy beside the board: nothing
     # in the design changes.
     "pcb_drc_rules": READONLY,
@@ -347,6 +348,9 @@ _CATEGORY_BY_NAME = {
     # Updates eda-agent itself, on every backend: about the tool surface,
     # like tool_catalog, rather than about any one EDA tool.
     "server_update": "meta",
+    # The session's length unit: how every tool reads and writes, not
+    # any one EDA tool's work.
+    "length_units": "meta",
     # The family tool for the audits; its members keep the audit_ prefix.
     "audit": "audit",
 }

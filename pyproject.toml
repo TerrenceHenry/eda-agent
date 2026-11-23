@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eda-agent"
-version = "0.8.1.post1"
+version = "0.8.2.post1"
 description = "MCP server for EDA tool automation, currently supports Altium Designer. Around 600 tools for schematic, PCB, and library ops via DelphiScript bridge."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -46,10 +46,14 @@ dependencies = [
     # The board layout engine (layout/): distance transforms, sparse
     # solves and graph searches for the placer, router and pours.
     "scipy>=1.10,<2",
-    # Pure-Python OLE/CFB reader for the headless Altium file parsers
-    # (fileio/): read .SchDoc/.PcbDoc without a running Altium. Tiny, no
-    # native deps; stable API across its 0.4x line.
-    "olefile>=0.46,<1",
+    # Text search in datasheet PDFs (design/datasheet_search.py): finds the
+    # page a manufacturer's land pattern is on. Pure Python, BSD.
+    "pypdf>=4,<7",
+    # Renders a region of a datasheet page as an image, with the printed
+    # numbers and where they sit (design/datasheet_render.py): the
+    # land-pattern figure is read zoomed and set beside the lands built
+    # from it. PDFium bindings, Apache-2.0 / BSD.
+    "pypdfium2>=4,<6",
     # Altium's IPC footprint batch templates are Excel 97 .xls files
     # (design/ipc_templates.py reads their columns and legends).
     "xlrd>=2.0,<3",
@@ -63,6 +67,18 @@ dependencies = [
 render = [
     "matplotlib>=3.5,<4",
 ]
+# Raytraced pictures of a board (pcb_render_3d): eda-agent's own path
+# tracer, built from render-core/. Without it top and bottom views are
+# drawn flat-shaded; the parts also need the models3d extra (CadQuery).
+render3d = [
+    "eda-agent-render>=0.1",
+]
+# The board router's grid search, compiled (pcb_autoroute): eda-agent's
+# own, built from route-core/. Without it the router searches with scipy,
+# more slowly, and finds paths of the same cost.
+route = [
+    "eda-agent-route>=0.2",
+]
 # KiCad backend (EDA_AGENT_BACKEND=kicad / --backend kicad). It talks to
 # KiCad's API server with the standard library alone, so this extra is
 # empty; it stays so that `pip install eda-agent[kicad]` keeps working.
@@ -73,6 +89,8 @@ kicad = []
 # body and says so. Kept out of the core install for its size.
 models3d = [
     "cadquery>=2.4",
+    # The review picture of a built model; CadQuery itself depends on it.
+    "vtk>=9.2",
 ]
 dev = [
     "pytest>=7.0",

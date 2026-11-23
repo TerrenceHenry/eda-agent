@@ -73,12 +73,6 @@ def test_each_type_is_read_through_a_local_of_its_own_type(
     assert member in body, f"{oid} is not read through a {member} local"
 
 
-def test_step_body_position_is_unavailable_instead_of_reading_missing_members(resolver):
-    body = resolver.split("Oid = eComponentBodyObject Then", 1)[1].split("End", 1)[0]
-    assert "Found := False" in body
-    assert "Body.x" not in body and "Body.y" not in body
-
-
 @pytest.mark.parametrize("oid,x_member,y_member", [
     ("eTextObject", "XLocation", "YLocation"),
     ("eArcObject", "XCenter", "YCenter"),
@@ -150,3 +144,14 @@ def test_the_resolver_cannot_raise_out_of_its_own_try(resolver: str):
     assert "Except" in resolver
     tail = resolver.split("Except", 1)[1]
     assert "Found := False" in tail
+
+
+def test_a_body_position_is_read_only_where_the_member_exists(resolver):
+    """AD21 has no x/y on a component body and halts even inside Try; 25
+    and later read it. The version is asked before the member is reached."""
+    branch = resolver.split("Oid = eComponentBodyObject Then", 1)[1]
+    branch = branch.split("Else If Oid =", 1)[0]
+    gate = branch.index("If AltiumVersionCode(0) >= 2500 Then")
+    assert "Found := False;" in resolver.split("Oid := Obj.ObjectId;", 1)[0]
+    assert "Body  : IPCB_ComponentBody;" in resolver
+    assert gate < branch.index("Body.x") and gate < branch.index("Body.y")

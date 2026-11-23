@@ -101,7 +101,8 @@ Begin
             (PropName = 'FootprintDescription') Or (PropName = 'DefaultPCB3DModel') Or
             (PropName = 'PackageSpecificHash') Or (PropName = 'SourceDescription') Or
             (PropName = 'JumpersVisible') Or (PropName = 'ChannelOffset') Or
-            (PropName = 'GroupNum') Or (PropName = 'FlippedOnLayer') Then Result := 6
+            (PropName = 'GroupNum') Or (PropName = 'FlippedOnLayer') Or
+            (PropName = 'NameOn') Or (PropName = 'CommentOn') Then Result := 6
     Else If (PropName = 'JumperID') Or (PropName = 'SwapID_Pad') Or
             (PropName = 'SwapID_Part') Or (PropName = 'SwappedPadName') Or
             (PropName = 'OwnerPart_ID') Or (PropName = 'DrillType') Or
@@ -272,6 +273,8 @@ Begin
         Else If PropName = 'EnablePartSwapping' Then Result := BoolToJsonStr(Comp.EnablePartSwapping)
         Else If PropName = 'IsBGA' Then Result := BoolToJsonStr(Comp.IsBGA)
         Else If PropName = 'LockStrings' Then Result := BoolToJsonStr(Comp.LockStrings)
+        Else If PropName = 'NameOn' Then Result := BoolToJsonStr(Comp.NameOn)
+        Else If PropName = 'CommentOn' Then Result := BoolToJsonStr(Comp.CommentOn)
         Else If PropName = 'PrimitiveLock' Then Result := BoolToJsonStr(Comp.PrimitiveLock)
         Else If PropName = 'NameAutoPosition' Then Result := IntToStr(Comp.NameAutoPosition)
         Else If PropName = 'CommentAutoPosition' Then Result := IntToStr(Comp.CommentAutoPosition)
@@ -355,6 +358,7 @@ Begin
         (PropName = 'IgnoreViolations') Or (PropName = 'ArcPourMode') Or
         (PropName = 'EnablePinSwapping') Or (PropName = 'EnablePartSwapping') Or
         (PropName = 'LockStrings') Or (PropName = 'PrimitiveLock') Or
+        (PropName = 'NameOn') Or (PropName = 'CommentOn') Or
         (PropName = 'Inverted') Or
         (PropName = 'UseInvertedRectangle') Or (PropName = 'DrawRemovedNecks') Or
         (PropName = 'DrawRemovedIslands') Or (PropName = 'DrawDeadCopper') Or
@@ -503,9 +507,37 @@ Begin
         Else If PropName = 'TextPosition' Then Dim.TextPosition := N
         Else If PropName = 'TextDimensionUnit' Then Dim.TextDimensionUnit := N
         Else If PropName = 'TextPrecision' Then Dim.TextPrecision := N
-        Else If PropName = 'TextFormat' Then Dim.TextFormat := Value
-        Else If PropName = 'TextPrefix' Then Dim.TextPrefix := Value
-        Else If PropName = 'TextSuffix' Then Dim.TextSuffix := Value
+        { The texts are read back: Altium keeps its own diameter sign as   }
+        { the prefix of a radial- or linear-diameter dimension and takes    }
+        { the assignment without a word, so an unread write was reported    }
+        { as made. A value it did not keep is refused.                      }
+        Else If PropName = 'TextFormat' Then
+        Begin
+            Dim.TextFormat := Value;
+            If Dim.TextFormat <> Value Then
+            Begin
+                Result := -1;
+                Exit;
+            End;
+        End
+        Else If PropName = 'TextPrefix' Then
+        Begin
+            Dim.TextPrefix := Value;
+            If Dim.TextPrefix <> Value Then
+            Begin
+                Result := -1;
+                Exit;
+            End;
+        End
+        Else If PropName = 'TextSuffix' Then
+        Begin
+            Dim.TextSuffix := Value;
+            If Dim.TextSuffix <> Value Then
+            Begin
+                Result := -1;
+                Exit;
+            End;
+        End
         Else If PropName = 'ArrowSize' Then Dim.ArrowSize := MilsToCoordF(F)
         Else If PropName = 'ArrowLineWidth' Then Dim.ArrowLineWidth := MilsToCoordF(F)
         Else If PropName = 'ArrowLength' Then Dim.ArrowLength := MilsToCoordF(F)
@@ -536,6 +568,8 @@ Begin
         If PropName = 'EnablePinSwapping' Then Comp.EnablePinSwapping := B
         Else If PropName = 'EnablePartSwapping' Then Comp.EnablePartSwapping := B
         Else If PropName = 'LockStrings' Then Comp.LockStrings := B
+        Else If PropName = 'NameOn' Then Comp.NameOn := B
+        Else If PropName = 'CommentOn' Then Comp.CommentOn := B
         Else If PropName = 'PrimitiveLock' Then Comp.PrimitiveLock := B
         { Change*Autoposition moves the text to the anchor as well as       }
         { recording it; writing NameAutoPosition alone leaves it where it is. }
@@ -600,6 +634,7 @@ Var
     Txt   : IPCB_Text;
     Arc   : IPCB_Arc;
     Fill  : IPCB_Fill;
+    Body  : IPCB_ComponentBody;
 Begin
     Result := 0;
     Found := False;
@@ -625,10 +660,16 @@ Begin
         End
         Else If Oid = eComponentBodyObject Then
         Begin
-            { No portable x/y member on IPCB_ComponentBody (AD21 halts
-              even inside Try). Use Bounds* for the extent; do not invent
-              an origin from an outline vertex or bounding-box centre. }
-            Found := False;
+            { IPCB_ComponentBody has no x/y on AD21: even a read inside Try
+              halts the script. Read on 25 and later, where it was measured;
+              elsewhere Bounds* give the extent. The version is asked in an
+              If of its own, before the member is reached. }
+            If AltiumVersionCode(0) >= 2500 Then
+            Begin
+                Body := Obj;
+                If WantY Then Result := Body.y Else Result := Body.x;
+                Found := True;
+            End;
         End
         Else If Oid = eTextObject Then
         Begin
@@ -680,8 +721,8 @@ End;
 {                                                                            }
 { THE MASK IS REACHED THROUGH IPCB_Pad. IPCB_Via does not expose the cache;   }
 { casting the via to a pad and that to the primitive does (issue #60).       }
-{ Assigning Via.SolderMaskExpansion directly on a board via faults in         }
-{ ScriptingSystem.DLL (PCB_SetViaSoldermaskRelief); the cache route is the    }
+{ Assigning Via.SolderMaskExpansion directly on a board via crashes the       }
+{ scripting engine (PCB_SetViaSoldermaskRelief); the cache route is the       }
 { one that works.                                                            }
 { SolderMaskExpansion is the TOP value once SolderMaskSeparate is true (the   }
 { two sides unlinked); with it false that one value serves both sides and    }
@@ -1078,6 +1119,92 @@ Begin
     Else Obj.SetState_UnionIndex := UIndex;
 End;
 
+{ A PLACED COMPONENT HAS TWO HEIGHTS, and neither is chosen for the caller. }
+{ Height is the footprint's Height field, typed by hand (often 0, or out of }
+{ step with the model); ModelHeight is its tallest 3D body, STEP and       }
+{ extruded alike (cylinders and spheres too). Either can be the wrong one   }
+{ for a part, so both are reported.                                         }
+
+{ T3DModelType of a body's model: 0 extruded, 1 STEP (measured), 2         }
+{ cylinder, 3 sphere. Anything else is named by its number.                }
+Function ComponentBodyKind(Body : IPCB_ComponentBody) : String;
+Var
+    Model : IPCB_Model;
+    Kind  : Integer;
+Begin
+    Result := 'unknown';
+    Model := Nil;
+    Try Model := Body.Model; Except Model := Nil; End;
+    If Model = Nil Then Exit;
+    Kind := -1;
+    Try Kind := Model.ModelType; Except Kind := -1; End;
+    If Kind = 0 Then Result := 'extruded'
+    Else If Kind = 1 Then Result := 'step'
+    Else If Kind = 2 Then Result := 'cylinder'
+    Else If Kind = 3 Then Result := 'sphere'
+    Else If Kind >= 0 Then Result := 'type_' + IntToStr(Kind);
+End;
+
+{ Walks the component's 3D bodies: MaxOverall = the tallest OverallHeight, }
+{ Count = how many, StepCount = how many are STEP models. With WantList the }
+{ result is the bodies as JSON objects (comma separated, no brackets),     }
+{ else ''.                                                                 }
+Function ComponentBodyScan(Comp : IPCB_Component; WantList : Boolean; Var MaxOverall : Integer; Var Count : Integer; Var StepCount : Integer) : String;
+Var
+    GIter : IPCB_GroupIterator;
+    Body  : IPCB_ComponentBody;
+    Overall, Standoff : Integer;
+    Ident, LayerName, Kind : String;
+Begin
+    Result := '';
+    MaxOverall := 0;
+    Count := 0;
+    StepCount := 0;
+    GIter := Comp.GroupIterator_Create;
+    Try
+        GIter.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        GIter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Body := GIter.FirstPCBObject;
+        While Body <> Nil Do
+        Begin
+            Overall := 0;
+            Try Overall := Body.OverallHeight; Except Overall := 0; End;
+            If (Count = 0) Or (Overall > MaxOverall) Then MaxOverall := Overall;
+            Inc(Count);
+            Kind := ComponentBodyKind(Body);
+            If Kind = 'step' Then Inc(StepCount);
+            If WantList Then
+            Begin
+                Standoff := 0;
+                Try Standoff := Body.StandoffHeight; Except Standoff := 0; End;
+                Ident := '';
+                Try Ident := Body.Identifier; Except Ident := ''; End;
+                LayerName := '';
+                Try LayerName := LayerDisplayName(Body.Layer); Except LayerName := ''; End;
+                If Result <> '' Then Result := Result + ',';
+                Result := Result + '{"identifier":"' + EscapeJsonString(Ident)
+                    + '","kind":"' + Kind
+                    + '","layer":"' + EscapeJsonString(LayerName)
+                    + '","standoff_mils":' + FloatToJsonStr(CoordToMilsF(Standoff))
+                    + ',"overall_mils":' + FloatToJsonStr(CoordToMilsF(Overall)) + '}';
+            End;
+            Body := GIter.NextPCBObject;
+        End;
+    Finally
+        Comp.GroupIterator_Destroy(GIter);
+    End;
+End;
+
+{ The component's tallest 3D body in mils as JSON, '' when it has none.  }
+Function ComponentModelHeightJson(Comp : IPCB_Component) : String;
+Var
+    MaxOverall, Count, StepCount : Integer;
+Begin
+    ComponentBodyScan(Comp, False, MaxOverall, Count, StepCount);
+    If Count > 0 Then Result := FloatToJsonStr(CoordToMilsF(MaxOverall))
+    Else Result := '';
+End;
+
 Function GetPCBProperty(Obj : IPCB_Primitive; PropName : String) : String;
 Var
     Track : IPCB_Track;
@@ -1123,6 +1250,9 @@ Begin
         Else If PropName = 'UniqueID' Then Result := Obj.UniqueID
         Else If PropName = 'IsElectricalPrim' Then Result := BoolToJsonStr(Obj.IsElectricalPrim)
         Else If PropName = 'Selected'   Then Result := BoolToJsonStr(Obj.Selected)
+        { Hidden from view (a component's designator or comment switched  }
+        { off, say); read only.                                           }
+        Else If PropName = 'IsHidden'   Then Result := BoolToJsonStr(Obj.IsHidden)
         { 'Net.Name' is accepted as well as 'Net'. Designator.Text and
           Comment.Text are already accepted alongside their bare forms,
           so a caller who used one of those infers a dotted rule that
@@ -1323,8 +1453,7 @@ Begin
                 Else If Pad.TopShape = eRectangular Then Result := 'rectangular'
                 Else If Pad.TopShape = eOctagonal Then Result := 'octagonal'
                 Else If Pad.TopShape = eRoundedRectangular Then Result := 'roundrectangle'
-                Else If PadCustomShapeSupported(0) Then
-                    If Pad.TopShape = eCustomShape Then Result := 'custom';
+                Else If ShapeIsCustom(Pad.TopShape) Then Result := 'custom';
             End;
         End
         Else If PropName = 'BotXSize' Then
@@ -1433,9 +1562,20 @@ Begin
         { A text's height and stroke width under the names a caller reaches  }
         { for (Altium's own are Size and Width), and whether it is a        }
         { component's designator or comment, so a filter can pick those out. }
+        { On a component Height is the footprint's Height field and        }
+        { ModelHeight its tallest 3D body ('' with none): both, unchosen.  }
         Else If PropName = 'Height' Then
         Begin
-            If Oid = eTextObject Then Begin Txt := Obj; Result := FloatToJsonStr(CoordToMilsF(Txt.Size)); End;
+            If Oid = eTextObject Then Begin Txt := Obj; Result := FloatToJsonStr(CoordToMilsF(Txt.Size)); End
+            Else If Oid = eComponentObject Then
+            Begin
+                Comp := Obj;
+                Result := FloatToJsonStr(CoordToMilsF(Comp.Height));
+            End;
+        End
+        Else If PropName = 'ModelHeight' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := ComponentModelHeightJson(Comp); End;
         End
         Else If PropName = 'StrokeWidth' Then
         Begin
@@ -1594,6 +1734,7 @@ Begin
         (PropName = 'TopXSize') Or (PropName = 'TopYSize') Or
         (PropName = 'StandoffHeight') Or (PropName = 'OverallHeight') Or
         (PropName = 'Height') Or (PropName = 'StrokeWidth') Or
+        (PropName = 'ModelHeight') Or
         (PropName = 'Size') Or (PropName = 'BotXSize') Or
         (PropName = 'BotYSize') Or (PropName = 'HoleWidth') Or
         (PropName = 'SizeTop') Or (PropName = 'SizeMid') Or
@@ -1644,6 +1785,31 @@ Begin
         Txt.MoveByXY(Before.Left - After.Left, Before.Bottom - After.Bottom);
     Txt.GraphicallyInvalidate;
     If Owner <> Nil Then Owner.EndModify;
+End;
+
+{ UseTTFonts, the TrueType switch Altium keeps beside TextKind. True      }
+{ makes the text TrueType. False makes a TrueType text stroke             }
+{ and leaves a barcode a barcode, which is not TrueType either: the      }
+{ caller asked for no TrueType, not for stroke. The two are written in   }
+{ step, as the TextKind writer does. False when Value is not a boolean.  }
+Function SetTextUseTTFonts(Txt : IPCB_Text; Value : String) : Boolean;
+Begin
+    Result := False;
+    If LowerCase(Value) = 'true' Then
+    Begin
+        Txt.TextKind := 1;
+        Txt.UseTTFonts := True;
+    End
+    Else If LowerCase(Value) = 'false' Then
+    Begin
+        If Txt.TextKind = 1 Then
+        Begin
+            Txt.TextKind := 0;
+            Txt.UseTTFonts := False;
+        End;
+    End
+    Else Exit;
+    Result := True;
 End;
 
 { A via's diameter and hole, written together inside the via's modify    }
@@ -1739,6 +1905,13 @@ Begin
         End
         Else If PropName = 'Layer'    Then SetPrimitiveLayerByName(Obj, Value)
         Else If PropName = 'Selected' Then Obj.Selected := StrToBool(Value)
+        { Read only: a designator or comment is shown with NameOn / CommentOn. }
+        Else If PropName = 'IsHidden' Then
+        Begin
+            NotePropertyDiag('failed', PropName);
+            Result := -1;
+            Exit;
+        End
         { Locked is read as Not Moveable, so it is written the same way;   }
         { PCB_LockNetRouting writes Moveable on any primitive already.      }
         Else If PropName = 'Locked' Then Obj.Moveable := Not StrToBool(Value)
@@ -1805,7 +1978,20 @@ Begin
             Else If Oid = ePadObject Then Begin Pad := Obj; Pad.Rotation := StrToFloatDef(Value, 0); End
             { A free text, or a component's designator / comment text: the   }
             { same member PCB_PlaceText and the layout copy already write.    }
-            Else If Oid = eTextObject Then Begin Txt := Obj; Txt.Rotation := StrToFloatDef(Value, 0); End
+            { A designator turns about its CENTRE, so its anchor (XLocation, }
+            { which X / Y read and move from) shifts, but Altium updates the }
+            { anchor only at the next geometry operation. MEASURED: in one   }
+            { set Rotation|X|Y the X write read the anchor from before the   }
+            { turn and landed off by the whole shift (up to ~110 mil), while }
+            { the Y after it was exact. The zero move brings the anchor up   }
+            { to date for the next property; a free text turns about its     }
+            { anchor and is not moved by it (issue #305).                    }
+            Else If Oid = eTextObject Then
+            Begin
+                Txt := Obj;
+                Txt.Rotation := StrToFloatDef(Value, 0);
+                Txt.MoveByXY(0, 0);
+            End
             Else Matched := False;
         End
         { A VIA'S HOLE AND DIAMETER. HoleSize had a pad branch only, and a   }
@@ -1953,6 +2139,16 @@ Begin
             Begin
                 Txt := Obj;
                 SetTextMirrorInPlace(Txt, LowerCase(Value) = 'true');
+            End;
+        End
+        Else If PropName = 'UseTTFonts' Then
+        Begin
+            If Oid <> eTextObject Then
+                Matched := False
+            Else
+            Begin
+                Txt := Obj;
+                If Not SetTextUseTTFonts(Txt, Value) Then Refused := True;
             End;
         End
         { A polygon's Name, as the Polygon Pour dialog shows it (issue     }
@@ -2166,26 +2362,16 @@ End;
 { without saying why. A comma is read as the decimal point, both sides are   }
 { vetted by IsFloatStr before the locale-safe StrToFloatDef parses them, so  }
 { nothing here can raise, and they must agree to half a coordinate unit      }
-{ (0.00005 mil). Every other property is still matched exactly.             }
+{ (0.00005 mil). An angle (Rotation=90.0 against 90) and a union index    }
+{ are numbers too. Every other property is still matched exactly.         }
 Function FilterValueMatchesPCB(PropName, Actual, Expected : String) : Boolean;
-Var
-    Want, Ch : String;
-    I : Integer;
 Begin
     Result := (Actual = Expected);
     If Result Then Exit;
-    If Not IsLengthProperty(PropName) Then Exit;
-    Want := '';
-    For I := 1 To Length(Expected) Do
-    Begin
-        Ch := Copy(Expected, I, 1);
-        If Ch = ',' Then Ch := '.';
-        Want := Want + Ch;
-    End;
-    Want := Trim(Want);
-    If Not IsFloatStr(Want) Then Exit;
-    If Not IsFloatStr(Actual) Then Exit;
-    Result := Abs(StrToFloatDef(Actual, 0) - StrToFloatDef(Want, 0)) < 0.00005;
+    If Not (IsLengthProperty(PropName) Or (PropName = 'Rotation')
+        Or (PropName = 'HoleRotation') Or (PropName = 'StartAngle')
+        Or (PropName = 'EndAngle') Or (PropName = 'UnionIndex')) Then Exit;
+    Result := FilterNumbersEqual(Actual, Expected);
 End;
 
 Function MatchesFilterPCB(Obj : IPCB_Primitive; FilterStr : String) : Boolean;
@@ -2375,7 +2561,7 @@ Begin
         (PropName = 'Layer') Or (PropName = 'Descriptor') Or
         (PropName = 'DetailString') Or (PropName = 'DRCError') Or
         (PropName = 'UniqueID') Or (PropName = 'IsElectricalPrim') Or
-        (PropName = 'Selected') Or (PropName = 'Net') Or
+        (PropName = 'Selected') Or (PropName = 'IsHidden') Or (PropName = 'Net') Or
         (PropName = 'Net.Name') Or (PropName = 'X1') Or (PropName = 'Y1') Or
         (PropName = 'X2') Or (PropName = 'Y2') Or (PropName = 'Width') Or
         (PropName = 'Radius') Or (PropName = 'StartAngle') Or
@@ -2405,6 +2591,7 @@ Begin
         (PropName = 'Locked') Or (PropName = 'Layer1') Or
         (PropName = 'Layer2') Or (PropName = 'IsRedundant') Or
         (PropName = 'Mode') Or (PropName = 'Height') Or
+        (PropName = 'ModelHeight') Or
         (PropName = 'StrokeWidth') Or (PropName = 'IsDesignator') Or
         (PropName = 'IsComment') Or (PropName = 'UseTTFonts') Or
         (PropName = 'MirrorFlag') Or
@@ -2472,7 +2659,7 @@ End;
 Function KnownPCBPropertyList(Dummy : Integer) : String;
 Begin
     Result := 'ObjectId, X, Y, Layer, Descriptor, DetailString, DRCError, '
-        + 'UniqueID, IsElectricalPrim, Selected, Net, X1, Y1, '
+        + 'UniqueID, IsElectricalPrim, Selected, IsHidden, Net, X1, Y1, '
         + 'X2, Y2, Width, Radius, StartAngle, EndAngle, XCenter, YCenter, '
         + 'HoleSize, Size, TopShape, TopXSize, TopYSize, Rotation, Name, '
         + 'Text, Pattern, Designator, Comment, SourceDesignator, '
@@ -2482,7 +2669,7 @@ Begin
           tells a caller a property does not exist when it does, which is
           how the pour flags were reported as unreachable. }
         + 'Kind, RemoveDead, RemoveNarrowNecks, RemoveIslandsByArea, '
-        + 'StandoffHeight, OverallHeight, BodyOpacity3D, InComponent, Component, '
+        + 'StandoffHeight, OverallHeight, ModelHeight, BodyOpacity3D, InComponent, Component, '
         + 'InPolygon, IsKeepout, IsKeepoutForCopper, IsKeepoutForTrack, '
         + 'IsKeepoutForVia, IsKeepoutForSMDPad, IsKeepoutForTHPad, '
         + 'TearDrop, Locked, Layer1, Layer2, IsRedundant, Mode, '
@@ -2507,7 +2694,7 @@ Begin
         + 'ArrowLength, ArrowPosition, ExtensionOffset, ExtensionLineWidth, '
         + 'ExtensionPickGap, PolygonType, BorderWidth, AvoidObsticles, '
         + 'ClipAcuteCorners, MitreCorners, IgnoreViolations, ArcPourMode, '
-        + 'EnablePinSwapping, EnablePartSwapping, IsBGA, LockStrings, PrimitiveLock, '
+        + 'EnablePinSwapping, EnablePartSwapping, IsBGA, LockStrings, PrimitiveLock, NameOn, CommentOn, '
         + 'NameAutoPosition, CommentAutoPosition, FootprintDescription, '
         + 'DefaultPCB3DModel, PackageSpecificHash, JumperID, SwapID_Pad, SwapID_Part, '
         + 'Inverted, UseInvertedRectangle, InvertedTTTextBorder, '
