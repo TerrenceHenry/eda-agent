@@ -1,6 +1,28 @@
 # Release verification: 2026.11.22.1
 
-The native results below record the builds tested at the time. Native verification of the 2026.11.22.1 fork integration is pending.
+## Native verification of the merged fork (2026-11-25)
+
+The package `0.8.2.post1` and bridge `2026.11.22.1` from fork commit
+`64c230a` passed on Altium Designer 21.4.1.30. The trial used a fresh
+Altium process, verified the running unit stamps and used disposable
+boards and libraries.
+
+- Separate pad expansions of 4 and 6 mil and via hole-edge relief of
+  7 mil per side persisted after reopening. An unsupported custom pad
+  shape was refused without changing the pad.
+- A comments-only change affected just the three selected components.
+  Repeating the request made no changes. Saved-file readback checked
+  all 447 component records and confirmed their designator states.
+- A STEP body moved by +100/+200 mil within 0.01 mil on all four bounds.
+  The layer and 50 mil model Z offset were verified after reopening.
+- A fresh footprint library reopened with matching pad geometry and
+  embedded STEP metadata. Altium refused a repeat export to the open
+  destination. The source and output hashes remained the same.
+- Screenshot capture produced a valid PNG of the scratch STEP board.
+  The bridge answered a subsequent ping.
+
+The original workspace, settings and bridge were restored and verified
+after the trial. The following sections record results for earlier builds.
 
 ## Local filtered-label guard assessment (2026-11-08)
 
