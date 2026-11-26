@@ -4645,7 +4645,7 @@ New Altium identifiers: `IPCB_ClearanceConstraint.GetClearance` /
 `SetState_IsClearanceToExposedCopper`. `MaxUncoupledLength` was already
 written on create.
 
-Verified live on AD 26.12.2.8, script 2026.11.25.1, on a scratch copy of
+Verified upstream on AD 26.12.2.8 with the v0.8.2 bridge on a scratch copy of
 a board and of a library, closed without saving:
 
 1. `pcb_get_rule_properties Clearance`: 45 cells, all 3.937 mil (the
