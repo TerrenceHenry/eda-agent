@@ -6,9 +6,9 @@ background-check opt-in remain available.
 
 ## Required check
 
-The **Fork policies** workflow runs on every push, pull request and merge
-queue candidate, without path filters. Its **Fork policies** job is the
-required GitHub Actions check for `main`. Keep that job name stable.
+The trusted **Fork policies (AppVeyor)** check is required for `main`.
+AppVeyor runs the fork policy test on Windows using the build settings
+for this repository. Keep the required check name and provider stable.
 
 The independent `tests/test_fork_policies.py` checks all Altium Pascal and
 form sources for sponsorship UI and heart icons, including the removed MDL2
@@ -31,13 +31,13 @@ applies to administrators too. Force pushes and branch deletion are disabled.
 ## Updating from upstream
 
 1. Prepare an upstream merge on a working branch in a separate worktree.
-   The installed MCP package reads the main checkout directly.
+   Deploy from the verified wheel and its matching bundled scripts.
 2. Preserve the fork policies, their workflow and tests when resolving
    conflicts. Keep `EDA_AGENT_UPDATE_CHECK=0` in the MCP configuration.
 3. Run the fork guard and the project's other required checks. Push the
-   working branch and wait for **Fork policies** to pass before merging.
-4. Update the installed checkout only after review. Reinstall the package,
-   deploy the Altium scripts, restart the bridge and reconnect Codex.
+   working branch and wait for **Fork policies (AppVeyor)** to pass before merging.
+4. After review and native verification, install the wheel in a dedicated
+   environment. Deploy the Altium scripts, restart the bridge and reconnect Codex.
 5. Verify the live MCP version, script location, unit hashes and updater
    environment. A successful source check alone is not live verification.
 
