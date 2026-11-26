@@ -163,7 +163,8 @@ def test_an_included_file_is_screened_too(tmp_path):
     elsewhere = tmp_path / "vendor"
     elsewhere.mkdir()
     (elsewhere / "m.lib").write_text(".control\nsource x\n.endc\n")
-    deck = f"t\n.include {elsewhere / 'm.lib'}\n.op\n.end"
+    include_path = elsewhere / "m.lib"
+    deck = f't\n.include "{include_path}"\n.op\n.end'
     assert deck_runner.unsafe_control(deck, tmp_path)
     (tmp_path / "loop.lib").write_text(".include loop.lib\n")
     assert deck_runner.unsafe_lines(".include loop.lib\n.op", tmp_path, [tmp_path]) == []
